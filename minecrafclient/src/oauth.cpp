@@ -70,9 +70,9 @@ static std::string ExtractString(const std::string& json, const std::string& key
 bool OAuth::ExchangeCode(const std::wstring& code, Config& cfg) {
     std::wstring body = L"grant_type=authorization_code"
                         L"&client_id=" + clientId_
-                        L"&client_secret=" + clientSecret_
-                        L"&code=" + code
-                        L"&redirect_uri=" + redirectUri_;
+                        + L"&client_secret=" + clientSecret_
+                        + L"&code=" + code
+                        + L"&redirect_uri=" + redirectUri_;
     std::string resp = PostToken(body);
     if (resp.empty()) return false;
     cfg.accessToken = util::StringToWString(ExtractString(resp, "access_token"));
@@ -84,8 +84,8 @@ bool OAuth::Refresh(Config& cfg) {
     if (cfg.refreshToken.empty()) return false;
     std::wstring body = L"grant_type=refresh_token"
                         L"&client_id=" + clientId_
-                        L"&client_secret=" + clientSecret_
-                        L"&refresh_token=" + cfg.refreshToken;
+                        + L"&client_secret=" + clientSecret_
+                        + L"&refresh_token=" + cfg.refreshToken;
     std::string resp = PostToken(body);
     if (resp.empty()) return false;
     cfg.accessToken = util::StringToWString(ExtractString(resp, "access_token"));
