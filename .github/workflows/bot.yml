@@ -1,4 +1,4 @@
-name: Build Windows Client
+name: Hanbot Client
 
 # 客户端是纯 Win32 + C++17、零第三方依赖、/MT 静态链接，
 # 目标机器不需要安装任何 VC++ 运行库。本工作流只负责在 GitHub 上编译出 exe。
