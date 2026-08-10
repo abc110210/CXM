@@ -36,23 +36,35 @@ jobs:
           Remove-Item -Recurse -Force WebView2SDK -ErrorAction SilentlyContinue
           Expand-Archive -Path webview2.nupkg -DestinationPath WebView2SDK -Force
 
-          # 递归探测 WebView2Loader.lib 的真实位置，兼容 NuGet 包顶层文件夹名差异
-          # （有的版本解压后为 WebView2SDK/Microsoft.Web.WebView2/build/native/...）
-          $libs = Get-ChildItem -Path WebView2SDK -Recurse -Filter WebView2Loader.lib
-          $lib = $libs | Where-Object { $_.DirectoryName -like "*\build\native\x64" } | Select-Object -First 1
-          if (-not $lib) { $lib = $libs | Select-Object -First 1 }
-          if (-not $lib) { Write-Error "未找到 WebView2Loader.lib"; exit 1 }
-          # 该 lib 所在层为 build/native/x64，其父目录 build/native 即 WEBVIEW2_SDK_DIR
-          $nativeDir = Split-Path -Parent $lib.DirectoryName
-          if (-not (Test-Path "$nativeDir/include/WebView2.h")) {
-            Write-Error "找到 WebView2Loader.lib 但同层缺少 include/WebView2.h，路径异常: $nativeDir"
-            exit 1
+          # 定位 build/native（含 include/WebView2.h 的那一层），兼容 NuGet 包顶层文件夹名差异
+          $native = Get-ChildItem -Path WebView2SDK -Recurse -Filter WebView2.h |
+                    Where-Object { $_.DirectoryName -like "*\build\native\include" } |
+                    ForEach-Object { Split-Path -Parent $_.DirectoryName } | Select-Object -First 1
+          if (-not $native) { Write-Error "未找到 build/native/include/WebView2.h"; exit 1 }
+
+          # 定位 WebView2Loader 导入库（import lib）。
+          # 旧版命名 WebView2Loader.lib；新版（>=1.0.2xxx）改名为 WebView2Loader.dll.lib，
+          # 另有 WebView2LoaderStatic.lib（静态库，数十 MB）。优先选显式命名的导入库，
+          # 回退则取 x64 下体积最小的 .lib（导入库仅几 KB，静态库几十 MB）。
+          $x64 = Join-Path $native "x64"
+          if (-not (Test-Path $x64)) { Write-Error "未找到 $x64 目录"; exit 1 }
+          $loaderLib = $null
+          foreach ($name in @("WebView2Loader.lib", "WebView2Loader.dll.lib")) {
+            $p = Join-Path $x64 $name
+            if (Test-Path $p) { $loaderLib = $p; break }
           }
-          Write-Host "WebView2 native dir: $nativeDir"
-          "WEBVIEW2_SDK_DIR=$nativeDir" >> $env:GITHUB_ENV
+          if (-not $loaderLib) {
+            $loaderLib = Get-ChildItem -Path $x64 -Filter *.lib | Sort-Object Length | Select-Object -First 1
+          }
+          if (-not $loaderLib) { Write-Error "未找到 WebView2Loader 导入库（x64 下无 .lib）"; exit 1 }
+
+          Write-Host "WebView2 native dir: $native"
+          Write-Host "WebView2 loader lib: $loaderLib"
+          "WEBVIEW2_SDK_DIR=$native" >> $env:GITHUB_ENV
+          "WEBVIEW2_LOADER_LIB=$loaderLib" >> $env:GITHUB_ENV
 
       - name: CMake 配置
-        run: cmake -B build -S minecrafclient -DWEBVIEW2_SDK_DIR="${{ env.WEBVIEW2_SDK_DIR }}"
+        run: cmake -B build -S minecrafclient -DWEBVIEW2_SDK_DIR="${{ env.WEBVIEW2_SDK_DIR }}" -DWEBVIEW2_LOADER_LIB="${{ env.WEBVIEW2_LOADER_LIB }}"
 
       - name: 编译
         run: cmake --build build --config ${{ github.event.inputs.build_type }}
