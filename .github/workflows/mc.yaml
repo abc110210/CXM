@@ -27,22 +27,32 @@ jobs:
       - name: 下载并解压 WebView2 SDK (NuGet 官方包)
         shell: pwsh
         run: |
-          # 从 NuGet 官方源拉取 Microsoft.Web.WebView2 的最新稳定版
+          # 取最新稳定版（过滤掉预发布版本）
           $idx = Invoke-RestMethod https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/index.json
-          $ver = $idx.versions[-1]
+          $ver = $idx.versions | Where-Object { $_ -notmatch '-' } | Sort-Object { [version] $_ } | Select-Object -Last 1
           Write-Host "使用 WebView2 SDK 版本: $ver"
           $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$ver/microsoft.web.webview2.$ver.nupkg"
           Invoke-WebRequest -Uri $url -OutFile webview2.nupkg
+          Remove-Item -Recurse -Force WebView2SDK -ErrorAction SilentlyContinue
           Expand-Archive -Path webview2.nupkg -DestinationPath WebView2SDK -Force
-          # 校验关键文件存在
-          if (-not (Test-Path WebView2SDK/build/native/include/WebView2.h)) {
-            Write-Error "解压后未找到 WebView2.h，NuGet 包结构可能已变化"
+
+          # 递归探测 WebView2Loader.lib 的真实位置，兼容 NuGet 包顶层文件夹名差异
+          # （有的版本解压后为 WebView2SDK/Microsoft.Web.WebView2/build/native/...）
+          $libs = Get-ChildItem -Path WebView2SDK -Recurse -Filter WebView2Loader.lib
+          $lib = $libs | Where-Object { $_.DirectoryName -like "*\build\native\x64" } | Select-Object -First 1
+          if (-not $lib) { $lib = $libs | Select-Object -First 1 }
+          if (-not $lib) { Write-Error "未找到 WebView2Loader.lib"; exit 1 }
+          # 该 lib 所在层为 build/native/x64，其父目录 build/native 即 WEBVIEW2_SDK_DIR
+          $nativeDir = Split-Path -Parent $lib.DirectoryName
+          if (-not (Test-Path "$nativeDir/include/WebView2.h")) {
+            Write-Error "找到 WebView2Loader.lib 但同层缺少 include/WebView2.h，路径异常: $nativeDir"
             exit 1
           }
-          Write-Host "WebView2 SDK 已就绪"
+          Write-Host "WebView2 native dir: $nativeDir"
+          "WEBVIEW2_SDK_DIR=$nativeDir" >> $env:GITHUB_ENV
 
       - name: CMake 配置
-        run: cmake -B build -S minecrafclient -DWEBVIEW2_SDK_DIR="${{ github.workspace }}/WebView2SDK"
+        run: cmake -B build -S minecrafclient -DWEBVIEW2_SDK_DIR="${{ env.WEBVIEW2_SDK_DIR }}"
 
       - name: 编译
         run: cmake --build build --config ${{ github.event.inputs.build_type }}
