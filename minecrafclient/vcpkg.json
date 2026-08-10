@@ -1,0 +1,7 @@
+{
+  "name": "stardust-launcher",
+  "version": "0.1.0",
+  "dependencies": [
+    "microsoft-webview2"
+  ]
+}
