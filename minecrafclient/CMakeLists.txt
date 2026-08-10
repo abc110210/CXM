@@ -1,5 +1,6 @@
 # 寄寄之家启动器 - CMake 构建配置
-# 依赖通过 vcpkg 管理（见 vcpkg.json，需 microsoft-webview2）
+# WebView2 SDK 通过官方 NuGet 包 Microsoft.Web.WebView2 提供（CI 中下载并解压），
+# 不再依赖 vcpkg，构建更快更可控。
 cmake_minimum_required(VERSION 3.20)
 project(StardustLauncher CXX)
 
@@ -8,8 +9,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 关闭默认 Manifest，使用自定义清单（带 DPI 感知、长路径支持）
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /MANIFEST:NO")
 
-# ---------- 找到 WebView2 SDK（来自 vcpkg 的 microsoft-webview2） ----------
-find_package(WebView2 CONFIG REQUIRED)
+# ---------- 定位 WebView2 SDK（NuGet 解压后的根目录，需含 build/native） ----------
+if(NOT WEBVIEW2_SDK_DIR)
+  set(WEBVIEW2_SDK_DIR "${CMAKE_SOURCE_DIR}/../WebView2SDK" CACHE PATH "WebView2 SDK 目录")
+endif()
+
+set(WV_INCLUDE "${WEBVIEW2_SDK_DIR}/build/native/include")
+set(WV_LIB "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2Loader.lib")
+set(WV_DLL "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2Loader.dll")
+
+if(NOT EXISTS "${WV_INCLUDE}/WebView2.h")
+  message(FATAL_ERROR
+    "未找到 WebView2 SDK 头文件。请确认 WEBVIEW2_SDK_DIR 指向解压后的 NuGet 包根目录"
+    "（应包含 build/native/include/WebView2.h）。当前路径: ${WV_INCLUDE}")
+endif()
 
 # ---------- 收集源文件 ----------
 file(GLOB SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
@@ -18,10 +31,11 @@ add_executable(StardustLauncher WIN32 ${SRC_FILES})
 
 target_include_directories(StardustLauncher PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${WV_INCLUDE}
 )
 
 target_link_libraries(StardustLauncher PRIVATE
-    WebView2::WebView2
+    ${WV_LIB}
     shlwapi
     winhttp
     bcrypt
@@ -37,13 +51,11 @@ add_custom_command(TARGET StardustLauncher POST_BUILD
     COMMENT "复制 res 资源到输出目录"
 )
 
-# ---------- 复制 WebView2 运行库（若有 DLL） ----------
-# vcpkg 的 microsoft-webview2 提供 WebView2Loader.dll，运行时需要它
-get_target_property(_wv_dll WebView2::WebView2 IMPORTED_LOCATION)
-if(_wv_dll AND EXISTS _wv_dll)
+# ---------- 复制 WebView2 运行库 WebView2Loader.dll ----------
+if(EXISTS "${WV_DLL}")
     add_custom_command(TARGET StardustLauncher POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${_wv_dll}
+            ${WV_DLL}
             $<TARGET_FILE_DIR:StardustLauncher>/
         COMMENT "复制 WebView2Loader.dll"
     )
