@@ -1,0 +1,54 @@
+name: MCLauncher Client
+
+# 手动触发：在 GitHub 仓库的 Actions 页面点击 "Run workflow"
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: '构建类型'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - Release
+          - Debug
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 MSVC 编译环境
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 下载并解压 WebView2 SDK (NuGet 官方包)
+        shell: pwsh
+        run: |
+          # 从 NuGet 官方源拉取 Microsoft.Web.WebView2 的最新稳定版
+          $idx = Invoke-RestMethod https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/index.json
+          $ver = $idx.versions[-1]
+          Write-Host "使用 WebView2 SDK 版本: $ver"
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$ver/microsoft.web.webview2.$ver.nupkg"
+          Invoke-WebRequest -Uri $url -OutFile webview2.nupkg
+          Expand-Archive -Path webview2.nupkg -DestinationPath WebView2SDK -Force
+          # 校验关键文件存在
+          if (-not (Test-Path WebView2SDK/build/native/include/WebView2.h)) {
+            Write-Error "解压后未找到 WebView2.h，NuGet 包结构可能已变化"
+            exit 1
+          }
+          Write-Host "WebView2 SDK 已就绪"
+
+      - name: CMake 配置
+        run: cmake -B build -S minecrafclient -DWEBVIEW2_SDK_DIR="${{ github.workspace }}/WebView2SDK"
+
+      - name: 编译
+        run: cmake --build build --config ${{ github.event.inputs.build_type }}
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: StardustLauncher-${{ github.event.inputs.build_type }}
+          path: build/bin/
