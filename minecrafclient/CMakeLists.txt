@@ -9,19 +9,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 关闭默认 Manifest，使用自定义清单（带 DPI 感知、长路径支持）
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /MANIFEST:NO")
 
-# ---------- 定位 WebView2 SDK（NuGet 解压后的根目录，需含 build/native） ----------
+# ---------- 定位 WebView2 SDK ----------
+# WEBVIEW2_SDK_DIR 应指向 NuGet 包解压后包含 "include/WebView2.h" 与
+# "x64/WebView2Loader.lib" 的那一层（即包内的 build/native）。CI 会自动探测并传入，
+# 本地手动构建时用 -DWEBVIEW2_SDK_DIR=.../build/native 指定。
 if(NOT WEBVIEW2_SDK_DIR)
-  set(WEBVIEW2_SDK_DIR "${CMAKE_SOURCE_DIR}/../WebView2SDK" CACHE PATH "WebView2 SDK 目录")
+  set(WEBVIEW2_SDK_DIR "${CMAKE_SOURCE_DIR}/../WebView2SDK" CACHE PATH "WebView2 SDK (build/native) 目录")
 endif()
 
-set(WV_INCLUDE "${WEBVIEW2_SDK_DIR}/build/native/include")
-set(WV_LIB "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2Loader.lib")
-set(WV_DLL "${WEBVIEW2_SDK_DIR}/build/native/x64/WebView2Loader.dll")
+set(WV_INCLUDE "${WEBVIEW2_SDK_DIR}/include")
+set(WV_LIB "${WEBVIEW2_SDK_DIR}/x64/WebView2Loader.lib")
+set(WV_DLL "${WEBVIEW2_SDK_DIR}/x64/WebView2Loader.dll")
 
 if(NOT EXISTS "${WV_INCLUDE}/WebView2.h")
   message(FATAL_ERROR
-    "未找到 WebView2 SDK 头文件。请确认 WEBVIEW2_SDK_DIR 指向解压后的 NuGet 包根目录"
-    "（应包含 build/native/include/WebView2.h）。当前路径: ${WV_INCLUDE}")
+    "未找到 WebView2 SDK 头文件（${WV_INCLUDE}/WebView2.h）。请确认 WEBVIEW2_SDK_DIR "
+    "指向 NuGet 包解压后含 build/native 的目录。")
 endif()
 
 # ---------- 收集源文件 ----------
