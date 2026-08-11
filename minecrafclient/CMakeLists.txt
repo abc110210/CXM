@@ -51,7 +51,6 @@ execute_process(
             --png  "${CMAKE_CURRENT_SOURCE_DIR}/res/background.png"
             --out  "${EMBEDDED_HTML}"
     RESULT_VARIABLE EMBED_RC
-    COMMENT "内嵌背景图到 HTML（base64）"
 )
 if(NOT EMBED_RC EQUAL 0)
     message(FATAL_ERROR "生成内嵌版 HTML 失败（embed_html.py 退出码 ${EMBED_RC}）")
