@@ -50,4 +50,24 @@ inline std::wstring GetExeDir() {
     return (pos == std::wstring::npos) ? L"." : path.substr(0, pos);
 }
 
+// 取系统临时目录 %TEMP%（去掉末尾反斜杠，方便拼路径）
+inline std::wstring GetTempDir() {
+    wchar_t buf[MAX_PATH + 2] = {0};
+    DWORD n = GetTempPathW(MAX_PATH + 1, buf);
+    if (n == 0 || n > MAX_PATH + 1) return L"C:\\Windows\\Temp";
+    std::wstring p(buf, n);
+    while (!p.empty() && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
+    return p.empty() ? std::wstring(L"C:\\Windows\\Temp") : p;
+}
+
+// 取 WebView2 运行时数据目录：%TEMP%\StardustWebView2（不存在则自动创建）。
+// WebView2 必须有 userDataFolder（缓存/Cookie/GPU 缓存），无法彻底"不生成"，
+// 只能移走——放系统临时目录，程序目录只保留 exe / dll / res / config.ini，
+// 且该目录可被系统清理策略安全回收。
+inline std::wstring GetWebView2DataDir() {
+    std::wstring dir = GetTempDir() + L"\\StardustWebView2";
+    CreateDirectoryW(dir.c_str(), nullptr);  // 已存在则静默忽略
+    return dir;
+}
+
 } // namespace util

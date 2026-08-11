@@ -6,9 +6,18 @@
 #include "core_scanner.h"
 #include <windows.h>
 #include <shlobj.h>      // IFileDialog
+#include <dwmapi.h>      // DwmSetWindowAttribute（Windows 11 圆角）
 #include <string>
 #include <chrono>
 #include <sstream>
+
+// 兼容旧版 Windows SDK：DWM 圆角属性
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
 
 // 从 JSON 字符串里取某个字符串字段的值（简单解析，避免引入 JSON 库）
 static std::string ExtractString(const std::string& json, const std::string& key) {
@@ -70,12 +79,16 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
 
     hwnd_ = CreateWindowExW(0, L"StardustLauncher", L"寄寄之家启动器",
                             WS_POPUP | WS_THICKFRAME,
-                            CW_USEDEFAULT, CW_USEDEFAULT, 900, 620,
+                            CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800,
                             nullptr, nullptr, hInstance, this);
     if (!hwnd_) return false;
 
     ShowWindow(hwnd_, nCmdShow);
     UpdateWindow(hwnd_);
+
+    // Windows 11 启用系统圆角，强化原生感
+    DWORD corner = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
     // 初始化 WebView2
     std::wstring html = util::GetExeDir() + L"\\res\\launcher.html";
@@ -84,21 +97,8 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
         [this](const std::wstring& uri)  { OnNavigate(uri); return true; },
         [this]() { // onReady
             // 把系统信息推给前端
-            std::wstring javaListJson = L"{\"type\":\"sys:java\",\"list\":[";
-            for (size_t i = 0; i < cfg_.javaList.size(); ++i) {
-                if (i) javaListJson += L",";
-                javaListJson += L"\"" + JsonEscape(cfg_.javaList[i].display) + L"\"";
-            }
-            javaListJson += L"]}";
-            SendToJs(javaListJson);
-
-            std::wstring coreListJson = L"{\"type\":\"sys:cores\",\"list\":[";
-            for (size_t i = 0; i < cfg_.coreList.size(); ++i) {
-                if (i) coreListJson += L",";
-                coreListJson += L"\"" + JsonEscape(cfg_.coreList[i].name) + L"\"";
-            }
-            coreListJson += L"]}";
-            SendToJs(coreListJson);
+            SendJavaList();
+            SendCoreList();
 
             MEMORYSTATUSEX mem = { sizeof(mem) };
             GlobalMemoryStatusEx(&mem);
@@ -172,6 +172,15 @@ void App::OnWebMessage(const std::wstring& jsonW) {
     }
     else if (type == "java:browse") {
         SelectJavaFolder();
+    }
+    else if (type == "sys:rescan") {
+        // 手动重新扫描 Java / 核心，结果写回 ini 并回传前端
+        JavaScanner::Scan(cfg_);
+        CoreScanner::Scan(cfg_);
+        cfg_.Save();
+        SendJavaList();
+        SendCoreList();
+        SendToJs(L"{\"type\":\"sys:rescanned\"}");
     }
     else if (type == "game:launch") {
         OnJsLaunchGame();
@@ -256,7 +265,7 @@ void App::OnJsLaunchGame() {
     }
 
     game_.SetOnExit([this]() { OnGameExit(); });
-    if (!game_.Start(cfg_.selectedJava, jar, cfg_.memoryMb)) return;
+    if (!game_.Start(cfg_.selectedJava, jar, cfg_.memoryMb, cfg_.gameDir)) return;
 
     playing_ = true;
     gameStartMs_ = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -297,6 +306,27 @@ void App::OnGameExit() {
     SendToJs(L"{\"type\":\"game:stopped\"}");
 }
 
+// ---------------- 回传列表给前端 ----------------
+void App::SendJavaList() {
+    std::wstring jl = L"{\"type\":\"sys:java\",\"list\":[";
+    for (size_t i = 0; i < cfg_.javaList.size(); ++i) {
+        if (i) jl += L",";
+        jl += L"\"" + JsonEscape(cfg_.javaList[i].display) + L"\"";
+    }
+    jl += L"]}";
+    SendToJs(jl);
+}
+
+void App::SendCoreList() {
+    std::wstring cl = L"{\"type\":\"sys:cores\",\"list\":[";
+    for (size_t i = 0; i < cfg_.coreList.size(); ++i) {
+        if (i) cl += L",";
+        cl += L"\"" + JsonEscape(cfg_.coreList[i].name) + L"\"";
+    }
+    cl += L"]}";
+    SendToJs(cl);
+}
+
 // ---------------- 选择 Java 文件夹 ----------------
 void App::SelectJavaFolder() {
     IFileDialog* pfd = nullptr;
@@ -314,14 +344,7 @@ void App::SelectJavaFolder() {
                 std::wstring exe = JavaScanner::PickManual(binDir, cfg_);
                 if (!exe.empty()) {
                     cfg_.Save();
-                    // 回传新的 java 列表
-                    std::wstring jl = L"{\"type\":\"sys:java\",\"list\":[";
-                    for (size_t i = 0; i < cfg_.javaList.size(); ++i) {
-                        if (i) jl += L",";
-                        jl += L"\"" + JsonEscape(cfg_.javaList[i].display) + L"\"";
-                    }
-                    jl += L"]}";
-                    SendToJs(jl);
+                    SendJavaList();   // 回传更新后的 Java 列表
                 } else {
                     SendToJs(L"{\"type\":\"game:error\",\"reason\":\"该目录未找到 java.exe\"}");
                 }

@@ -20,8 +20,9 @@ HRESULT WebView2Host::Init(HWND hwnd, const std::wstring& htmlFile,
     onReady_ = onReady;
     onNavigated_ = onNavigated;
 
-    // 用户数据目录（缓存、Cookie 等）放 exe 同目录
-    std::wstring userData = util::GetExeDir() + L"\\webview_data";
+    // WebView2 缓存、Cookie 等统一放系统临时目录 %TEMP%\StardustWebView2，
+    // 程序目录保持干净，只保留 exe / dll / res / config.ini（与 client 项目同策略）
+    std::wstring userData = util::GetWebView2DataDir();
 
     return CreateCoreWebView2EnvironmentWithOptions(
         nullptr, userData.c_str(), nullptr,
@@ -34,6 +35,20 @@ HRESULT WebView2Host::Init(HWND hwnd, const std::wstring& htmlFile,
                             if (!ctrl) return E_FAIL;
                             controller_ = ctrl;
                             ctrl->get_CoreWebView2(&webview_);
+
+                            // 精装原生感：禁用右键菜单、DevTools、状态栏、缩放、浏览器快捷键
+                            ComPtr<ICoreWebView2Settings> settings;
+                            if (SUCCEEDED(webview_->get_Settings(&settings))) {
+                                settings->put_AreDefaultContextMenusEnabled(FALSE);
+                                settings->put_AreDevToolsEnabled(FALSE);
+                                settings->put_IsStatusBarEnabled(FALSE);
+                                settings->put_IsZoomControlEnabled(FALSE);
+                                // 浏览器快捷键在 ICoreWebView2Settings3 上，按需查询后设置
+                                ComPtr<ICoreWebView2Settings3> settings3;
+                                if (SUCCEEDED(settings.As(&settings3))) {
+                                    settings3->put_AreBrowserAcceleratorKeysEnabled(FALSE);
+                                }
+                            }
 
                             RECT r; GetClientRect(hwnd_, &r);
                             ctrl->put_Bounds(r);

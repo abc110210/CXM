@@ -6,8 +6,7 @@ project(StardustLauncher CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# 关闭默认 Manifest，使用自定义清单（带 DPI 感知、长路径支持）
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /MANIFEST:NO")
+# 通过 res/app.manifest 嵌入自定义清单（DPI PerMonitorV2、长路径、v6 通用控件）
 
 # ---------- 定位 WebView2 SDK ----------
 # WEBVIEW2_SDK_DIR 应指向 NuGet 包解压后包含 "include/WebView2.h" 与
@@ -43,7 +42,9 @@ endif()
 # ---------- 收集源文件 ----------
 file(GLOB SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
-add_executable(StardustLauncher WIN32 ${SRC_FILES})
+add_executable(StardustLauncher WIN32 ${SRC_FILES}
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/app.manifest"
+)
 
 target_include_directories(StardustLauncher PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -56,6 +57,7 @@ target_link_libraries(StardustLauncher PRIVATE
     winhttp
     bcrypt
     version
+    dwmapi
 )
 
 # ---------- 复制资源目录到输出目录 ----------

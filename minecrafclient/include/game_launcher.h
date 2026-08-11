@@ -10,8 +10,10 @@ public:
     void SetOnExit(std::function<void()> cb) { onExit_ = cb; }
 
     // 启动游戏。javaExe: java.exe 路径；coreJar: 核心 jar 路径；memMb: 分配内存
+    // workDir: 游戏工作目录（.minecraft 所在），避免默认在 exe 旁生成散落文件
     // 返回 true 表示成功启动
-    bool Start(const std::wstring& javaExe, const std::wstring& coreJar, int memMb);
+    bool Start(const std::wstring& javaExe, const std::wstring& coreJar,
+               int memMb, const std::wstring& workDir);
 
     bool IsRunning() const { return running_; }
     void Stop();

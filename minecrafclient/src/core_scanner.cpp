@@ -6,8 +6,8 @@
 void CoreScanner::Scan(Config& cfg) {
     std::vector<CoreInfo> out;
 
-    // .minecraft 与启动器同目录
-    std::wstring mcDir = util::GetExeDir() + L"\\.minecraft";
+    // 游戏目录从 config（持久化到 ini）读取，默认与启动器同目录的 .minecraft
+    std::wstring mcDir = cfg.gameDir;
     std::wstring versionsDir = mcDir + L"\\versions";
     if (GetFileAttributesW(versionsDir.c_str()) == INVALID_FILE_ATTRIBUTES) {
         util::Log("未找到 .minecraft\\versions 目录，跳过核心扫描");

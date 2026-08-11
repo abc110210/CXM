@@ -37,6 +37,10 @@ public:
     std::wstring selectedCore;
     int memoryMb = 8192;
 
+    // ---- 游戏目录（.minecraft 所在）----
+    // 持久化到 ini，避免每次启动都去猜/扫盘；默认与启动器同目录
+    std::wstring gameDir;
+
     // ---- 登录缓存 ----
     std::wstring accessToken;     // LittleSkin 返回的 access token
     std::wstring refreshToken;

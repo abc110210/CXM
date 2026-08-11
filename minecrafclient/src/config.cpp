@@ -11,6 +11,8 @@ Config::Config() {
     redirectUri = L"stardust://oauth/callback";
     serverUrl = L"https://你的域名.com";   // 改成你的备案域名
     serverSecret = L"请改成服务端 config.json 里的 secret_key";
+    // 游戏目录默认与启动器同目录（.minecraft），可改并通过 ini 持久化
+    gameDir = util::GetExeDir() + L"\\.minecraft";
 }
 
 std::wstring Config::GetConfigPath() const { return path_; }
@@ -32,6 +34,7 @@ void Config::Load() {
     selectedCore = getStr(L"launcher", L"selected_core", selectedCore);
     memoryMb     = getInt(L"launcher", L"memory_mb", memoryMb);
     currentRole  = getStr(L"launcher", L"selected_role", currentRole);
+    gameDir      = getStr(L"launcher", L"game_dir", gameDir);
 
     accessToken  = getStr(L"auth", L"access_token", accessToken);
     refreshToken = getStr(L"auth", L"refresh_token", refreshToken);
@@ -77,6 +80,7 @@ void Config::Save() {
     setStr(L"launcher", L"selected_core", selectedCore);
     setInt(L"launcher", L"memory_mb", memoryMb);
     setStr(L"launcher", L"selected_role", currentRole);
+    setStr(L"launcher", L"game_dir", gameDir);
 
     setStr(L"auth", L"access_token", accessToken);
     setStr(L"auth", L"refresh_token", refreshToken);

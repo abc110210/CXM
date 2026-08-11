@@ -15,10 +15,14 @@
     --shadow:0 18px 50px rgba(40,12,60,.55);
     --font:"PingFang SC","Microsoft YaHei UI","Microsoft YaHei","Segoe UI",system-ui,-apple-system,sans-serif;
   }
-  *{margin:0;padding:0;box-sizing:border-box}
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{height:100%;overflow:hidden;font-family:var(--font);color:var(--text);
-    -webkit-font-smoothing:antialiased;user-select:none}
+    -webkit-font-smoothing:antialiased;user-select:none;-webkit-user-select:none;
+    overscroll-behavior:none;-webkit-overflow-scrolling:auto}
   body{background:#1a1030}
+  img,svg{-webkit-user-drag:none;user-drag:none;-webkit-user-select:none;pointer-events:none}
+  input,select,textarea,button,pre{-webkit-user-select:text;user-select:text}
+  button,label,a{-webkit-user-select:none;user-select:none}
   ::-webkit-scrollbar{width:8px}
   ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.25);border-radius:8px}
   input,select,button{font-family:var(--font)}
@@ -92,6 +96,12 @@
   .btn.primary:hover{transform:translateY(-2px);box-shadow:0 16px 34px rgba(255,143,199,.55)}
   .btn.primary:active{transform:translateY(0)}
   .btn.ghost{background:var(--glass);border:1px solid var(--stroke);color:var(--text)}
+  /* 轻量提示 toast */
+  .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(12px);
+    background:rgba(20,12,40,.92);border:1px solid var(--stroke);color:#fff;font-size:13px;
+    padding:10px 18px;border-radius:12px;opacity:0;pointer-events:none;transition:all .25s ease;z-index:80;
+    box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .btn.ghost:hover{background:var(--glass-strong)}
   .hint{margin-top:16px;font-size:12px;color:var(--muted);text-align:center;line-height:1.6}
 
@@ -185,12 +195,6 @@
     padding:0 16px;font-size:11px;color:var(--muted);
     background:rgba(255,255,255,.05);border-top:1px solid var(--stroke);z-index:20}
   .statusbar .ok{color:#9affc4}
-
-  .preview-toggle{position:fixed;right:16px;bottom:14px;z-index:60;display:flex;
-    align-items:center;gap:8px;font-size:12px;color:var(--muted);
-    background:rgba(20,12,40,.5);border:1px solid var(--stroke);border-radius:999px;
-    padding:7px 12px;cursor:pointer}
-  .preview-toggle .dot{width:9px;height:9px;border-radius:50%;background:#7dffa8;box-shadow:0 0 8px #7dffa8}
 
   .action-row{display:flex;gap:10px;margin-top:18px}
   .action-row .btn{flex:1}
@@ -359,6 +363,11 @@
               <div class="mem-info">可用内存 <b id="mem-avail">16.0 GB</b> · 推荐 <b id="mem-rec">8G</b></div>
             </div>
 
+            <button class="btn ghost" onclick="rescan()" style="height:44px">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+              重新扫描 Java 与游戏核心
+            </button>
+
             <button class="btn ghost" onclick="showView('home')" style="height:46px">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
               返回首页
@@ -371,7 +380,7 @@
           <div class="card">
             <div class="eyebrow">About</div>
             <h1>关于<span class="grad">本启动器</span></h1>
-            <p class="sub">寄寄之家启动器 v0.6 · 预览版<br/>专为 LittleSkin 外置登录设计的 Minecraft 启动器。</p>
+            <p class="sub">寄寄之家启动器<br/>专为 LittleSkin 外置登录设计的 Minecraft 启动器。</p>
             <div class="field"><label>账号服务</label>
               <a style="color:#bfeeff;cursor:pointer" onclick="openExternal('https://littleskin.cn')">littleskin.cn</a>
             </div>
@@ -385,13 +394,8 @@
     <div class="statusbar">
       <span class="ok" id="st-dot">● 就绪</span>
       <span id="st-user">未登录</span>
-      <span style="margin-left:auto">寄寄之家启动器 v0.6 · 预览</span>
+      <span style="margin-left:auto">寄寄之家启动器</span>
     </div>
-  </div>
-
-  <!-- 预览切换 -->
-  <div class="preview-toggle" onclick="togglePreview()">
-    <span class="dot"></span> 预览：<span id="pv-label">未登录</span> · 点击切换
   </div>
 
 <script>
@@ -450,6 +454,9 @@
       }
       if(msg.type==='game:error'){
         alert('启动失败：' + (msg.reason || '未知错误'));
+      }
+      if(msg.type==='sys:rescanned'){
+        toast('已重新扫描 Java 与游戏核心');
       }
     });
   }
@@ -551,10 +558,24 @@
       chrome.webview.postMessage(JSON.stringify({type:'java:browse'}));
     } else {
       const sel=document.getElementById('javaSelect');
-      const opt=document.createElement('option'); opt.text='C:\\Program Files\\Java\\手动选择 (预览)'; opt.selected=true;
+      const opt=document.createElement('option'); opt.text='C:\\Program Files\\Java\\手动选择'; opt.selected=true;
       sel.add(opt);
-      alert('真实环境中会弹出文件夹选择框，让你选中 Java 的 bin 目录。');
+      alert('请使用启动器本体浏览 Java 的 bin 目录。');
     }
+  }
+
+  function rescan(){
+    if(window.chrome&&chrome.webview){
+      chrome.webview.postMessage(JSON.stringify({type:'sys:rescan'}));
+    } else {
+      toast('请在启动器本体中重新扫描');
+    }
+  }
+  function toast(msg){
+    let t=document.getElementById('toast');
+    if(!t){ t=document.createElement('div'); t.id='toast'; t.className='toast'; document.body.appendChild(t); }
+    t.textContent=msg; t.classList.add('show');
+    clearTimeout(t._timer); t._timer=setTimeout(()=>t.classList.remove('show'),1800);
   }
 
   function renderSettings(){
@@ -593,7 +614,7 @@
       chrome.webview.postMessage(JSON.stringify({type:'game:launch'}));
       return;
     }
-    // 预览模式：模拟 C++ 启动进程
+    // 浏览器预览模式：模拟 C++ 启动进程
     onGameStarted();
     setTimeout(onGameStopped, 5000); // 5 秒后模拟进程退出
   }
@@ -672,11 +693,7 @@
     const m=Math.floor(s/60); return Math.floor(m/60)+'h '+ (m%60)+'m';
   }
 
-  /* ===================== 预览 / 窗口 ===================== */
-  function togglePreview(){
-    if(logged) logout(); else loginSuccess('Steve_Chan');
-    document.getElementById('pv-label').textContent = logged?'已登录':'未登录';
-  }
+  /* ===================== 窗口控制 ===================== */
   function fakeWin(a){ if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'window',action:a})); }
 
   /* ===================== 初始化 ===================== */
@@ -686,7 +703,6 @@
       p.style.left=Math.random()*100+'vw'; p.style.animationDuration=(6+Math.random()*7)+'s';
       p.style.animationDelay=(-Math.random()*10)+'s'; p.style.transform='scale('+(0.6+Math.random()*0.8)+')';
       box.appendChild(p); }
-    document.getElementById('pv-label').textContent = logged?'已登录':'未登录';
     if(logged){
       document.getElementById('st-user').textContent=localStorage.getItem(LS.name)||'Steve_Chan';
       updateRoleMenu();

@@ -2,7 +2,8 @@
 #include "game_launcher.h"
 #include "common.h"
 
-bool GameLauncher::Start(const std::wstring& javaExe, const std::wstring& coreJar, int memMb) {
+bool GameLauncher::Start(const std::wstring& javaExe, const std::wstring& coreJar,
+                          int memMb, const std::wstring& workDir) {
     if (running_) return false;
 
     // 构造启动命令。真实 Minecraft 还需要 classpath/natives/version 等参数，
@@ -16,8 +17,12 @@ bool GameLauncher::Start(const std::wstring& javaExe, const std::wstring& coreJa
     PROCESS_INFORMATION pi = { 0 };
     // CreateProcess 会修改命令行缓冲区，必须可写
     std::wstring cmdMutable = cmd;
+    // 确保工作目录存在，避免创建失败
+    CreateDirectoryW(workDir.c_str(), nullptr);
+    // 以 workDir（即 gameDir/.minecraft 所在）为工作目录启动，
+    // 这样游戏数据落在固定目录，不会默认散落到 exe 旁边
     if (!CreateProcessW(nullptr, &cmdMutable[0], nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                        CREATE_NO_WINDOW, nullptr, workDir.c_str(), &si, &pi)) {
         util::Log("启动游戏失败，错误码: " + std::to_string(GetLastError()));
         return false;
     }

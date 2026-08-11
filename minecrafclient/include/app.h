@@ -24,6 +24,8 @@ private:
     void GameTickLoop();                           // 每秒向 JS 推送时长
     void SendToJs(const std::wstring& json);        // 给 JS 发消息
     void SelectJavaFolder();                        // 弹文件夹选择框选 Java bin
+    void SendJavaList();                            // 回传 Java 列表给前端
+    void SendCoreList();                            // 回传核心列表给前端
 
     HWND hwnd_ = nullptr;
     HINSTANCE hinst_ = nullptr;
