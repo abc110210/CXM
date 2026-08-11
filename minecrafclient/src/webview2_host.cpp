@@ -247,9 +247,32 @@ void WebView2Host::Navigate(const std::wstring& urlOrFile) {
 }
 
 // OAuth 登录回调后回到启动器首页：重新用内嵌 HTML 渲染
-void WebView2Host::Reload() {
-    if (webview_ && !html_.empty())
-        webview_->NavigateToString(html_.c_str());
+void WebView2Host::Reload(const std::wstring& bootError) {
+    if (webview_ && !html_.empty()) {
+        std::wstring h = html_;
+        if (!bootError.empty()) {
+            // 把错误原因安全注入页面顶部脚本，交给 JS 用原生 toast 显示
+            std::wstring esc;
+            esc.reserve(bootError.size() + 16);
+            for (wchar_t c : bootError) {
+                if (c == L'\\' || c == L'"') { esc.push_back(L'\\'); esc.push_back(c); }
+                else if (c == L'\n') esc += L"\\n";
+                else if (c == L'\r') esc += L"\\r";
+                else if (c == L'<') esc += L"\\u003c";   // 防止 </script> 提前闭合
+                else esc.push_back(c);
+            }
+            std::wstring script = L"<script>window.__bootError=\"" + esc + L"\";</script>";
+            size_t pos = h.find(L"<body");
+            if (pos != std::wstring::npos) {
+                size_t end = h.find(L">", pos);
+                if (end != std::wstring::npos) h.insert(end + 1, script);
+                else h = script + h;
+            } else {
+                h = script + h;
+            }
+        }
+        webview_->NavigateToString(h.c_str());
+    }
 }
 
 void WebView2Host::Resize() {

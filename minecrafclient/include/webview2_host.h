@@ -34,7 +34,8 @@ public:
     void Navigate(const std::wstring& urlOrFile);
 
     // 重新加载内嵌 HTML（OAuth 登录回调后回到启动器首页用）
-    void Reload();
+    // bootError 非空时把错误原因注入页面，由 JS 用原生 toast 显示（避免被重载冲掉）
+    void Reload(const std::wstring& bootError = L"");
 
     // 窗口尺寸变化时调用
     void Resize();

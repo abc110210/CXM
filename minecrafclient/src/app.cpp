@@ -137,9 +137,14 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
 
             MEMORYSTATUSEX mem = { sizeof(mem) };
             GlobalMemoryStatusEx(&mem);
-            double gb = (double)mem.ullTotalPhys / (1024.0 * 1024 * 1024);
-            std::wstring memJson = L"{\"type\":\"sys:memory\",\"availableGB\":" +
-                std::to_wstring((int)gb) + L",\"recommendedG\":8}";
+            double totalGB = (double)mem.ullTotalPhys / (1024.0 * 1024 * 1024);
+            int total = (int)(totalGB + 0.5);                 // 四舍五入取整
+            int recommended = total / 2;                      // 推荐分配约一半物理内存
+            if (recommended < 2) recommended = 2;             // 至少 2G
+            if (recommended > 16) recommended = 16;           // 封顶 16G
+            std::wstring memJson = L"{\"type\":\"sys:memory\",\"totalGB\":" +
+                std::to_wstring(total) + L",\"recommendedG\":" +
+                std::to_wstring(recommended) + L"}";
             SendToJs(memJson);
         },
         [this]() { // onNavigated
@@ -264,8 +269,8 @@ void App::ParseCallback(const std::wstring& uri) {
         std::wstring desc = GetQueryParam(uri, L"error_description");
         std::wstring reason = desc.empty() ? (L"OAuth 错误: " + err) : desc;
         SendToJs(L"{\"type\":\"oauth:fail\",\"reason\":\"" + JsonEscape(reason) + L"\"}");
-        // 回到启动器首页，避免停留在空白/错误页
-        webview_.Reload();
+        // 回到启动器首页，避免停留在空白/错误页；把错误原因交给页面用原生 toast 显示
+        webview_.Reload(reason);
         return;
     }
 
