@@ -47,9 +47,9 @@
 
   .app{position:fixed;inset:0;display:flex;flex-direction:column}
 
-  /* 标题栏 */
+  /* 标题栏：拖拽完全由 C++ WM_NCHITTEST 管理（更可靠），不用 -webkit-app-region */
   .titlebar{height:44px;flex:0 0 44px;display:flex;align-items:center;
-    padding:0 14px;gap:10px;app-region:drag;-webkit-app-region:drag;
+    padding:0 14px;gap:10px;
     background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,0));
     border-bottom:1px solid var(--stroke);z-index:20}
   .logo{width:22px;height:22px;border-radius:7px;background:var(--logo,var(--accent));
@@ -57,7 +57,7 @@
     box-shadow:0 0 14px rgba(185,140,255,.8);position:relative;flex:0 0 auto}
   .title{font-weight:600;font-size:14px;letter-spacing:.5px}
   .title small{font-weight:400;color:var(--muted);font-size:11px;margin-left:6px}
-  .winbar{margin-left:auto;display:flex;gap:8px;app-region:no-drag;-webkit-app-region:no-drag}
+  .winbar{margin-left:auto;display:flex;gap:8px}
   .winbtn{width:30px;height:28px;border:none;border-radius:8px;cursor:pointer;
     background:var(--glass);color:var(--text);display:grid;place-items:center;transition:.18s}
   .winbtn:hover{background:var(--glass-strong)}
@@ -203,6 +203,20 @@
   .action-row .btn{flex:1}
   .split-or{display:flex;align-items:center;gap:12px;margin:14px 0;color:var(--muted);font-size:12px}
   .split-or::before,.split-or::after{content:"";flex:1;height:1px;background:rgba(255,255,255,.15)}
+
+  /* 注册页 —— 用户要求恢复 iframe 占满右侧的布局 */
+  #view-register{position:absolute;inset:0;width:100%}
+  #view-register .register-screen{border-radius:0;border:none;box-shadow:none;background:rgba(26,16,48,.55)}
+  .register-screen{height:100%;display:flex;flex-direction:column;overflow:hidden;
+    backdrop-filter:blur(22px)}
+  .register-bar{height:52px;flex:0 0 52px;display:flex;align-items:center;gap:12px;
+    padding:0 14px;border-bottom:1px solid var(--stroke);
+    background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,0))}
+  .register-bar button{width:34px;height:34px;border:none;border-radius:10px;cursor:pointer;
+    background:var(--glass);color:var(--text);display:grid;place-items:center}
+  .register-bar button:hover{background:var(--glass-strong)}
+  .register-title{flex:1;font-size:14px;font-weight:600;color:var(--text);text-align:center;padding-right:46px}
+  .register-frame{flex:1;border:none;width:100%;background:#fff}
 </style>
 </head>
 <body>
@@ -224,14 +238,14 @@
     <div class="body">
       <!-- 侧边栏 -->
       <aside class="sidebar">
-        <button class="nav active" data-view="home">
+        <button class="nav active" data-view="home" onclick="showView('home')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>首页</button>
-        <button class="nav" data-view="settings">
+        <button class="nav" data-view="settings" onclick="showView('settings')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>设置</button>
-        <button class="nav" data-view="register">
+        <button class="nav" data-view="register" onclick="showView('register')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M16 11h6"/></svg>注册</button>
         <div class="spacer"></div>
-        <button class="nav" data-view="about">
+        <button class="nav" data-view="about" onclick="showView('about')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.5v.5"/></svg>关于</button>
       </aside>
 
@@ -308,17 +322,14 @@
 
         <!-- 注册页 -->
         <section class="screen" id="view-register">
-          <div class="card">
-            <div class="eyebrow">Join LittleSkin</div>
-            <h1>创建<span class="grad">新账号</span></h1>
-            <p class="sub">注册在你的默认浏览器中完成更安全。点击下方按钮，启动器会为你打开 LittleSkin 官方注册页。</p>
-            <button class="btn primary" onclick="openRegisterExternal()">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15,3 21,3 21,9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-              在浏览器中打开注册页
-            </button>
-            <div class="split-or">或</div>
-            <button class="btn ghost" onclick="showView('home')">返回首页</button>
-            <div class="hint">注册完成后，回到首页用新账号登录即可。</div>
+          <div class="register-screen">
+            <div class="register-bar">
+              <button onclick="showView('home')" title="返回首页">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+              </button>
+              <div class="register-title">注册 LittleSkin 账号</div>
+            </div>
+            <iframe class="register-frame" id="registerFrame" src="about:blank"></iframe>
           </div>
         </section>
 
@@ -487,31 +498,39 @@
     });
   }
 
+  /* ===================== 窗口控制（前置声明，确保内联 onclick 总能找到） ===================== */
+  function fakeWin(a){ try { if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'window',action:a})); } catch(e){ console.error('fakeWin:',e); } }
+
   /* ===================== 视图切换 ===================== */
   function showView(v){
-    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-    document.getElementById('view-'+v).classList.add('active');
-    document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active', n.dataset.view===v));
-    if(v==='home') renderHome();
-    if(v==='settings') renderSettings();
+    try {
+      document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+      document.getElementById('view-'+v).classList.add('active');
+      document.querySelectorAll('.nav').forEach(n=>n.classList.toggle('active', n.dataset.view===v));
+      if(v==='home') renderHome();
+      if(v==='register') loadRegister();
+      if(v==='settings') renderSettings();
+    } catch(e){ console.error('showView error:', e); }
   }
-  // 侧边栏导航：事件委托，比逐个绑定 onclick 更可靠，同时支持 Enter/Space
-  (function initNav(){
-    const sidebar = document.querySelector('.sidebar');
-    if (!sidebar) return;
-    sidebar.addEventListener('click', function(e){
-      const nav = e.target.closest('.nav');
-      if (!nav || !nav.dataset.view) return;
-      showView(nav.dataset.view);
-    });
-    sidebar.addEventListener('keydown', function(e){
-      if (e.key !== 'Enter' && e.key !== ' ') return;
-      const nav = e.target.closest('.nav');
-      if (!nav || !nav.dataset.view) return;
-      e.preventDefault();
-      showView(nav.dataset.view);
-    });
-  })();
+  /* 侧边栏导航：双保险——内联 onclick 已直接调用 showView，此处事件委托作为备用 */
+  try {
+    (function initNav(){
+      const sidebar = document.querySelector('.sidebar');
+      if (!sidebar) return;
+      sidebar.addEventListener('click', function(e){
+        const nav = e.target.closest('.nav');
+        if (!nav || !nav.dataset.view) return;
+        showView(nav.dataset.view);
+      });
+      sidebar.addEventListener('keydown', function(e){
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const nav = e.target.closest('.nav');
+        if (!nav || !nav.dataset.view) return;
+        e.preventDefault();
+        showView(nav.dataset.view);
+      });
+    })();
+  } catch(e){ console.error('initNav:', e); }
 
   function renderHome(){
     document.getElementById('home-login').style.display = logged?'none':'block';
@@ -554,46 +573,43 @@
   }
 
   /* ===================== 角色切换 ===================== */
-  const roleBtn=document.getElementById('roleBtn');
-  const roleMenu=document.getElementById('roleMenu');
-  roleBtn.addEventListener('click',function(e){
-    e.stopPropagation();
-    const willShow=!roleMenu.classList.contains('show');
-    roleMenu.classList.toggle('show', willShow);
-    roleBtn.classList.toggle('open', willShow);
-  });
-  roleMenu.addEventListener('click',function(e){
-    const item=e.target.closest('.role-item');
-    if(!item) return;
-    e.stopPropagation();
-    currentRole=item.dataset.role;
-    localStorage.setItem(LS.role,currentRole);
-    document.getElementById('dash-name').textContent=currentRole;
-    document.getElementById('role-name').textContent=currentRole;
-    roleMenu.classList.remove('show');
-    roleBtn.classList.remove('open');
-    updateRoleMenu();
-    if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'role:change',name:currentRole}));
-  });
-  document.addEventListener('click',function(){
-    roleMenu.classList.remove('show');
-    roleBtn.classList.remove('open');
-  });
+  try {
+    const roleBtn=document.getElementById('roleBtn');
+    const roleMenu=document.getElementById('roleMenu');
+    roleBtn.addEventListener('click',function(e){
+      e.stopPropagation();
+      const willShow=!roleMenu.classList.contains('show');
+      roleMenu.classList.toggle('show', willShow);
+      roleBtn.classList.toggle('open', willShow);
+    });
+    roleMenu.addEventListener('click',function(e){
+      const item=e.target.closest('.role-item');
+      if(!item) return;
+      e.stopPropagation();
+      currentRole=item.dataset.role;
+      localStorage.setItem(LS.role,currentRole);
+      document.getElementById('dash-name').textContent=currentRole;
+      document.getElementById('role-name').textContent=currentRole;
+      roleMenu.classList.remove('show');
+      roleBtn.classList.remove('open');
+      updateRoleMenu();
+      if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'role:change',name:currentRole}));
+    });
+    document.addEventListener('click',function(){
+      roleMenu.classList.remove('show');
+      roleBtn.classList.remove('open');
+    });
+  } catch(e){ console.error('role setup:', e); }
   function updateRoleMenu(){
     document.querySelectorAll('.role-item').forEach(it=>{
       it.classList.toggle('active', it.dataset.role===currentRole);
     });
   }
 
-  /* ===================== 注册页 ===================== */
-  function openRegisterExternal(){
-    const url='https://littleskin.cn/auth/register';
-    if(window.chrome&&chrome.webview){
-      chrome.webview.postMessage(JSON.stringify({type:'browser:open',url}));
-      showToast('已在浏览器中打开注册页', 'success');
-    } else {
-      showToast('注册页将在浏览器中打开：'+url, 'info');
-    }
+  /* ===================== 注册页（iframe 内嵌 LittleSkin 注册页） ===================== */
+  function loadRegister(){
+    const f=document.getElementById('registerFrame');
+    if(f) f.src='https://littleskin.cn/auth/register';
   }
   function openExternal(url){ if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'browser:open',url})); }
 
@@ -616,12 +632,14 @@
     document.getElementById('mem-avail').textContent = total + ' GB';
     document.getElementById('mem-rec').textContent = sysRecG + 'G';
   }
-  document.querySelectorAll('.mem-presets .chip-btn').forEach(btn=>{
-    btn.addEventListener('click',function(){
-      const v=parseInt(this.dataset.mem,10);
-      setMem(v);
+  try {
+    document.querySelectorAll('.mem-presets .chip-btn').forEach(btn=>{
+      btn.addEventListener('click',function(){
+        const v=parseInt(this.dataset.mem,10);
+        setMem(v);
+      });
     });
-  });
+  } catch(e){ console.error('mem-presets setup:', e); }
   function setMem(v){
     currentMem=v; localStorage.setItem(LS.mem,String(v));
     document.getElementById('memInput').value=v;
@@ -725,24 +743,25 @@
     const m=Math.floor(s/60); return Math.floor(m/60)+'h '+ (m%60)+'m';
   }
 
-  /* ===================== 窗口控制 ===================== */
-  function fakeWin(a){ if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'window',action:a})); }
-
   /* ===================== 初始化 ===================== */
-  (function(){
-    // OAuth 失败等场景：C++ 重载页面时会把错误原因注入 window.__bootError，这里原生化显示
-    if(window.__bootError){ showToast(window.__bootError, 'error'); window.__bootError=null; }
-    const box=document.getElementById('petals');
-    for(let i=0;i<18;i++){ const p=document.createElement('div'); p.className='petal';
-      p.style.left=Math.random()*100+'vw'; p.style.animationDuration=(6+Math.random()*7)+'s';
-      p.style.animationDelay=(-Math.random()*10)+'s'; p.style.transform='scale('+(0.6+Math.random()*0.8)+')';
-      box.appendChild(p); }
-    if(logged){
-      setText('st-user', localStorage.getItem(LS.name)||'Steve_Chan');
-      updateRoleMenu();
-    }
-    renderHome();
-  })();
+  try {
+    (function(){
+      // OAuth 失败等场景：C++ 重载页面时会把错误原因注入 window.__bootError，这里原生化显示
+      if(window.__bootError){ showToast(window.__bootError, 'error'); window.__bootError=null; }
+      const box=document.getElementById('petals');
+      if(box){
+        for(let i=0;i<18;i++){ const p=document.createElement('div'); p.className='petal';
+          p.style.left=Math.random()*100+'vw'; p.style.animationDuration=(6+Math.random()*7)+'s';
+          p.style.animationDelay=(-Math.random()*10)+'s'; p.style.transform='scale('+(0.6+Math.random()*0.8)+')';
+          box.appendChild(p); }
+      }
+      if(logged){
+        setText('st-user', localStorage.getItem(LS.name)||'Steve_Chan');
+        updateRoleMenu();
+      }
+      renderHome();
+    })();
+  } catch(e){ console.error('init:', e); }
 </script>
 </body>
 </html>
