@@ -34,15 +34,17 @@ def main() -> int:
         return 1
 
     html = html_path.read_text(encoding="utf-8")
-    if "background.png" not in html:
-        print(f"[embed_html] 警告: HTML 中未找到 background.png 引用，跳过替换", file=sys.stderr)
     # 兼容 url("background.png") / url(background.png) / url('background.png')
+    # HTML 源已经用占位符 BG_PLACEHOLDER 时也兼容（幂等替换）
     import re
-    html = re.sub(
-        r'url\(\s*["\']?background\.png["\']?\s*\)',
+    replaced = re.sub(
+        r'url\(\s*["\']?(?:background\.png|BG_PLACEHOLDER)["\']?\s*\)',
         f'url("{PLACEHOLDER}")',
         html,
     )
+    if replaced == html and PLACEHOLDER not in html:
+        print(f"[embed_html] 警告: HTML 中未找到 background.png / BG_PLACEHOLDER 引用，跳过替换", file=sys.stderr)
+    html = replaced
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")

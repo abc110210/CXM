@@ -40,6 +40,13 @@ if(NOT EXISTS "${WV_LIB}")
     "旧版为 WebView2Loader.lib；请在 CI 中通过 -DWEBVIEW2_LOADER_LIB 传入真实路径。")
 endif()
 
+# 运行时 DLL 存在性检查（要嵌入 exe 资源段，RC 编译期必须能读到）
+if(NOT EXISTS "${WV_DLL}")
+  message(FATAL_ERROR
+    "未找到 WebView2Loader 运行时 DLL（${WV_DLL}）。该文件会被嵌入 exe 资源段，"
+    "编译期必须存在；请确认 NuGet 包 x64 目录下有 WebView2Loader.dll。")
+endif()
+
 # ---------- 生成内嵌版 HTML（背景图改为占位符）----------
 # WebView2 用 NavigateToString 渲染内嵌 HTML，对超大 HTML 会静默失败（白屏）。
 # 故 HTML 本体始终保持 < 50KB：背景图另作 RCDATA 资源，运行时由 C++ 注入。
