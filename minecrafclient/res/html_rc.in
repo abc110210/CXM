@@ -1,4 +1,12 @@
-// 由 CMake 配置阶段生成：把内嵌版 HTML（含 base64 背景图）以 RT_HTML 资源编译进 exe。
-// html_rc.rc 生成在 build/ 目录，故用相对路径 ../include/resource.h 指向源码头文件。
+// 由 CMake 配置阶段生成：把 HTML / 背景图 / WebView2Loader.dll / 应用图标 全部作为
+// 资源编译进 exe —— 程序目录只需 exe + config.ini 两个文件。
+//   IDI_APP_ICON       ICON     窗口 / 任务栏 / EXE 文件图标（多尺寸 ICO）
+//   IDR_APP_HTML       RT_HTML  启动器 UI
+//   IDR_BG_PNG         RCDATA   背景图（运行时 base64 + CSS 变量注入页面）
+//   IDR_WEBVIEW2_DLL   RCDATA   WebView2Loader.dll（运行时释放到 %TEMP% 后 LoadLibrary）
+// html_rc.rc 生成在 build/ 目录，故用相对路径 ../include/resource.h。
 #include "../include/resource.h"
-IDR_APP_HTML HTML "@EMBEDDED_HTML@"
+IDI_APP_ICON       ICON    "@EMBEDDED_ICO@"
+IDR_APP_HTML       HTML    "@EMBEDDED_HTML@"
+IDR_BG_PNG         RCDATA  "@EMBEDDED_PNG@"
+IDR_WEBVIEW2_DLL   RCDATA  "@EMBEDDED_DLL@"

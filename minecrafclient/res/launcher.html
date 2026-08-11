@@ -27,9 +27,10 @@
   ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.25);border-radius:8px}
   input,select,button{font-family:var(--font)}
 
+  /* --bg 由 C++ 运行时注入：url("data:image/png;base64,...") */
   .bg{position:fixed;inset:0;background:
       linear-gradient(180deg,rgba(26,16,48,.35) 0%,rgba(26,16,48,.60) 100%),
-      url("background.png") center/cover no-repeat;
+      var(--bg,url("BG_PLACEHOLDER")) center/cover no-repeat;
       filter:saturate(1.05)}
   .bg::after{content:"";position:absolute;inset:0;
       background:radial-gradient(120% 80% at 50% 0%,transparent 30%,rgba(26,16,48,.60) 100%)}

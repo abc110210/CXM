@@ -75,6 +75,10 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
     wc.hInstance = hInstance;
     wc.lpszClassName = L"StardustLauncher";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    // 窗口图标 + 任务栏图标（从 exe 资源 IDI_APP_ICON 取，自动选合适尺寸；
+    // ico 最小 32x32，Windows 需要更小时自动缩放）
+    wc.hIcon   = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, 0);
     RegisterClassW(&wc);
 
     // 无边框、无系统标题栏的原生应用窗口：
@@ -106,7 +110,7 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
     DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
     // 初始化 WebView2（网页已内嵌进 exe 资源，由 host 自动加载渲染）
-    webview_.Init(hwnd_,
+    HRESULT hrInit = webview_.Init(hwnd_,
         [this](const std::wstring& json) { OnWebMessage(json); },
         [this](const std::wstring& uri)  { OnNavigate(uri); return true; },
         [this]() { // onReady
@@ -127,6 +131,13 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
                 webview_.ExecuteScript(L"loginSuccess('" + pendingUsername_ + L"')");
             }
         });
+    if (FAILED(hrInit)) {
+        // 给用户一个明确提示，避免再次出现"白屏但不知为何"
+        MessageBoxW(hwnd_,
+            L"启动器界面初始化失败。\n可能原因：内嵌 HTML 资源缺失或 WebView2 运行库加载失败。\n请查看控制台/日志获取详细错误。",
+            L"寄寄之家启动器", MB_OK | MB_ICONERROR);
+        return false;
+    }
 
     return true;
 }

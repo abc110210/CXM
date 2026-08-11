@@ -40,15 +40,17 @@ if(NOT EXISTS "${WV_LIB}")
     "旧版为 WebView2Loader.lib；请在 CI 中通过 -DWEBVIEW2_LOADER_LIB 传入真实路径。")
 endif()
 
-# ---------- 生成内嵌版 HTML（背景图 base64 注入）----------
-# WebView2 用 NavigateToString 渲染内嵌 HTML，无法引用外部文件，
-# 故由 tools/embed_html.py 在构建时把 background.png 转 data URI 内联进 HTML。
+# ---------- 生成内嵌版 HTML（背景图改为占位符）----------
+# WebView2 用 NavigateToString 渲染内嵌 HTML，对超大 HTML 会静默失败（白屏）。
+# 故 HTML 本体始终保持 < 50KB：背景图另作 RCDATA 资源，运行时由 C++ 注入。
+# 同样把 WebView2Loader.dll 也作为 RCDATA 嵌入，运行时释放到 %TEMP% 后
+# LoadLibrary，程序目录不再需要任何外部 dll。
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
 set(EMBEDDED_HTML "${CMAKE_CURRENT_BINARY_DIR}/embedded/launcher.html")
 execute_process(
     COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_html.py"
             --html "${CMAKE_CURRENT_SOURCE_DIR}/res/launcher.html"
-            --png  "${CMAKE_CURRENT_SOURCE_DIR}/res/background.png"
             --out  "${EMBEDDED_HTML}"
     RESULT_VARIABLE EMBED_RC
 )
@@ -56,10 +58,18 @@ if(NOT EMBED_RC EQUAL 0)
     message(FATAL_ERROR "生成内嵌版 HTML 失败（embed_html.py 退出码 ${EMBED_RC}）")
 endif()
 
-# 生成 RC：把内嵌版 HTML 以 RT_HTML 资源编译进 exe
+# 生成 RC：HTML / 背景图 / WebView2Loader.dll 全部作为资源编译进 exe
 # 用原生反斜杠路径，并把每个反斜杠转义成 \\，避免 RC 编译器把 \a \t 等当转义序列
-file(TO_NATIVE_PATH "${EMBEDDED_HTML}" EMBEDDED_HTML_NATIVE)
-string(REPLACE "\\" "\\\\" EMBEDDED_HTML "${EMBEDDED_HTML_NATIVE}")
+function(escape_rc_path input out)
+    file(TO_NATIVE_PATH "${input}" _nat)
+    string(REPLACE "\\" "\\\\" _esc "${_nat}")
+    set(${out} "${_esc}" PARENT_SCOPE)
+endfunction()
+
+escape_rc_path("${EMBEDDED_HTML}" EMBEDDED_HTML_RC)
+escape_rc_path("${CMAKE_CURRENT_SOURCE_DIR}/res/background.png" EMBEDDED_PNG_RC)
+escape_rc_path("${WV_DLL}" EMBEDDED_DLL_RC)
+escape_rc_path("${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico" EMBEDDED_ICO_RC)
 configure_file(res/html_rc.in "${CMAKE_CURRENT_BINARY_DIR}/html_rc.rc" @ONLY)
 
 # ---------- 收集源文件 ----------
@@ -88,18 +98,10 @@ target_link_libraries(StardustLauncher PRIVATE
     dwmapi
 )
 
-# ---------- 资源已内嵌进 exe，不再复制 res\ 到输出目录 ----------
-# 网页（launcher.html）与背景图已编译进 exe（RT_HTML 资源），程序目录不再需要 res\。
-
-# ---------- 复制 WebView2 运行库 WebView2Loader.dll ----------
-if(EXISTS "${WV_DLL}")
-    add_custom_command(TARGET StardustLauncher POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${WV_DLL}
-            $<TARGET_FILE_DIR:StardustLauncher>/
-        COMMENT "复制 WebView2Loader.dll"
-    )
-endif()
+# ---------- 资源已全部内嵌进 exe，程序目录无需任何外部文件 ----------
+# 网页（RT_HTML）+ 背景图（RCDATA）+ WebView2Loader.dll（RCDATA）全部在 exe 内，
+# 运行时 WebView2Loader.dll 释放到 %TEMP%，WebView2 缓存也放 %TEMP%。
+# exe 顶层只剩：StardustLauncher.exe + config.ini。
 
 # 设置输出目录，方便打包
 set_target_properties(StardustLauncher PROPERTIES
