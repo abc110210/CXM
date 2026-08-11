@@ -14,7 +14,7 @@ WebView2Host::~WebView2Host() {}
 // 从 exe 资源读取内嵌 HTML（RT_HTML -> IDR_APP_HTML）
 std::wstring WebView2Host::LoadAppHtml() {
     HINSTANCE hInst = GetModuleHandleW(nullptr);
-    HRSRC hRes = FindResourceW(hInst, MAKEINTRESOURCE(IDR_APP_HTML), RT_HTML);
+    HRSRC hRes = FindResourceW(hInst, MAKEINTRESOURCEW(IDR_APP_HTML), RT_HTML);
     if (!hRes) {
         util::Log("LoadAppHtml: FindResourceW(IDR_APP_HTML, RT_HTML) 失败，HTML 未嵌入 exe");
         return L"";
