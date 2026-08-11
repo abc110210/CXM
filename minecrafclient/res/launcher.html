@@ -34,16 +34,17 @@
   /* --bg 由 C++ 运行时注入：url("data:image/png;base64,...") */
   .bg{position:fixed;inset:0;background:
       linear-gradient(180deg,rgba(26,16,48,.35) 0%,rgba(26,16,48,.60) 100%),
-      var(--bg,url("BG_PLACEHOLDER")) center/cover no-repeat;
-      filter:saturate(1.05)}
+      var(--bg,url("BG_PLACEHOLDER")) center/cover no-repeat}
   .bg::after{content:"";position:absolute;inset:0;
       background:radial-gradient(120% 80% at 50% 0%,transparent 30%,rgba(26,16,48,.60) 100%)}
+  /* 花瓣动画：减少到 8 个 + 限制运行 30 秒后自动停止，避免 GPU 合成层长时间累积崩溃 */
   .petals{position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:5}
   .petal{position:absolute;top:-20px;width:12px;height:12px;opacity:.8;
     background:radial-gradient(circle at 30% 30%,#ffd6ec,#ff9ecb);
-    border-radius:12px 1px 12px 1px;animation:fall linear infinite}
+    border-radius:12px 1px 12px 1px;animation:fall linear infinite;will-change:transform}
   @keyframes fall{0%{transform:translateY(-20px) translateX(0) rotate(0)}
     100%{transform:translateY(105vh) translateX(40px) rotate(360deg)}}
+  .petals.stopped .petal{animation:none;opacity:0;transition:opacity 1s}
 
   .app{position:fixed;inset:0;display:flex;flex-direction:column}
 
@@ -750,10 +751,13 @@
       if(window.__bootError){ showToast(window.__bootError, 'error'); window.__bootError=null; }
       const box=document.getElementById('petals');
       if(box){
-        for(let i=0;i<18;i++){ const p=document.createElement('div'); p.className='petal';
+        // 花瓣数量从 18 减到 8，减轻 GPU 合成层压力
+        for(let i=0;i<8;i++){ const p=document.createElement('div'); p.className='petal';
           p.style.left=Math.random()*100+'vw'; p.style.animationDuration=(6+Math.random()*7)+'s';
           p.style.animationDelay=(-Math.random()*10)+'s'; p.style.transform='scale('+(0.6+Math.random()*0.8)+')';
           box.appendChild(p); }
+        // 30 秒后停止花瓣动画，避免无限 CSS 动画导致 GPU 渲染崩溃（黑屏）
+        setTimeout(function(){ box.classList.add('stopped'); }, 30000);
       }
       if(logged){
         setText('st-user', localStorage.getItem(LS.name)||'Steve_Chan');
