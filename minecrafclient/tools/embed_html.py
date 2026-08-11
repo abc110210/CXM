@@ -53,4 +53,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # CI 的 Windows 控制台默认代码页可能是 cp1252，直接 print 中文会抛
+    # UnicodeEncodeError 导致构建失败。强制 stdout/stderr 走 UTF-8，
+    # 编码失败用 ? 替换，保证脚本永不因输出问题崩掉（CMake 只看退出码）。
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())
