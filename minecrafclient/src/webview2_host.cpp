@@ -293,6 +293,6 @@ FARPROC WINAPI WebView2DelayLoadFailureHook(unsigned int dliNotify, PDelayLoadIn
     return NULL;  // 让默认错误处理弹窗（其他 dll 失败时仍正常报错）
 }
 
-// 注册到 MSVC 延迟加载器（链接器会调用这个符号）
-__declspec(selectany) PfnDliHook __pfnDliFailureHook2 = WebView2DelayLoadFailureHook;
+// 注册到 MSVC 延迟加载器（delayimp.h 已 extern 声明该符号，这里只提供定义）
+PfnDliHook __pfnDliFailureHook2 = WebView2DelayLoadFailureHook;
 } // extern "C"
