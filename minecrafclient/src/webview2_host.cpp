@@ -151,6 +151,7 @@ HRESULT WebView2Host::Init(HWND hwnd,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [this](HRESULT, ICoreWebView2Environment* env) -> HRESULT {
                 if (!env) return E_FAIL;
+                env_ = env;   // 保存 Environment（后续 CreateWebResourceResponse 要用）
                 env->CreateCoreWebView2Controller(hwnd_,
                     Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
                         [this](HRESULT, ICoreWebView2Controller* ctrl) -> HRESULT {
@@ -207,15 +208,13 @@ HRESULT WebView2Host::Init(HWND hwnd,
                                             }
                                             bootError_.clear();
                                         }
-                                        // 构造 text/html 响应
+                                        // 构造 text/html 响应（Environment 在 Init 时已保存）
                                         IStream* stream = SHCreateMemStream(
                                             (const BYTE*)page.data(), (UINT)page.size());
                                         if (!stream) return E_FAIL;
-                                        ComPtr<ICoreWebView2Environment> env;
-                                        webview_->get_Environment(&env);
-                                        if (!env) { stream->Release(); return E_FAIL; }
+                                        if (!env_) { stream->Release(); return E_FAIL; }
                                         ComPtr<ICoreWebView2WebResourceResponse> response;
-                                        HRESULT hr = env->CreateWebResourceResponse(
+                                        HRESULT hr = env_->CreateWebResourceResponse(
                                             stream, 200, L"OK",
                                             L"Content-Type: text/html; charset=utf-8",
                                             &response);
