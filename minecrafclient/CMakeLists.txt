@@ -103,7 +103,15 @@ target_link_libraries(StardustLauncher PRIVATE
     bcrypt
     version
     dwmapi
+    delayhlp   # delayload helper（/DELAYLOAD:WebView2Loader.dll 需要）
 )
+
+# 关键：延迟加载 WebView2Loader.dll
+#   - 默认链接下，Windows loader 在 exe 启动时就自动 LoadLibrary("WebView2Loader.dll")，
+#     程序目录没 dll 就弹"找不到 dll"错误，且在我们 EnsureWebView2LoaderDll() 之前。
+#   - /DELAYLOAD 后 dll 只在第一次调用 WebView2 API 时才加载，给我们时间先释放 dll 到 %TEMP%。
+#   - 失败兜底见 webview2_host.cpp 注册的 __pfnDliFailureHook2 钩子。
+target_link_options(StardustLauncher PRIVATE /DELAYLOAD:WebView2Loader.dll)
 
 # ---------- 资源已全部内嵌进 exe，程序目录无需任何外部文件 ----------
 # 网页（RT_HTML）+ 背景图（RCDATA）+ WebView2Loader.dll（RCDATA）全部在 exe 内，
