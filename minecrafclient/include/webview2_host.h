@@ -39,14 +39,14 @@ public:
     // 窗口尺寸变化时调用
     void Resize();
 
+    // 公开：让 delayload 失败钩子也能调，确保 dll 就位
+    static std::wstring EnsureWebView2LoaderDll();
+
 private:
     // 从当前 exe 资源读取内嵌 HTML（RT_HTML -> IDR_APP_HTML），失败返回空串
     static std::wstring LoadAppHtml();
     // 从 exe 资源读取背景图 PNG（RCDATA -> IDR_BG_PNG），失败返回空 vector
     static std::vector<uint8_t> LoadBackgroundPng();
-    // 确保 WebView2Loader.dll 已被 LoadLibrary（不在 exe 旁时从资源释放到 %TEMP%）
-    // 返回 dll 全路径（成功）或空串（失败）。
-    static std::wstring EnsureWebView2LoaderDll();
     // 把背景图 base64 通过 setProperty('--bg') 注入页面（幂等，可多次调用）
     void InjectBackground();
 
