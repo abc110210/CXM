@@ -7,7 +7,6 @@
 #include <string>
 #include <cstring>    // _stricmp
 #include <vector>
-#include <delayimp.h>   // delayload 钩子（运行期 dll 释放兜底）
 
 using namespace Microsoft::WRL;
 
@@ -59,15 +58,17 @@ std::vector<uint8_t> WebView2Host::LoadBackgroundPng() {
 
 // ========== 运行时释放 WebView2Loader.dll ==========
 // 程序目录如果已经有 dll（开发期），直接复用；否则从 exe 资源释放到 %TEMP%。
-// 这样程序目录最终只剩 exe + config.ini，dll 走系统临时区（与 WebView2 缓存同盘）。
+// 重要：释放出的文件名必须与 /DELAYLOAD:WebView2Loader.dll 完全一致（WebView2Loader.dll），
+// 这样延迟加载器 LoadLibrary("WebView2Loader.dll") 时能命中已加载模块表，无需搜索路径。
 std::wstring WebView2Host::EnsureWebView2LoaderDll() {
     // 1) 优先复用程序目录的 dll（开发/调试期更顺手）
     std::wstring exeDir = util::GetExeDir();
     std::wstring exeSide = exeDir + L"\\WebView2Loader.dll";
     if (GetFileAttributesW(exeSide.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        LoadLibraryW(exeSide.c_str());  // 立即加载，让延迟加载器后续命中
         return exeSide;
     }
-    // 2) 否则从资源释放到 %TEMP%
+    // 2) 否则从资源释放到 %TEMP%\WebView2Loader.dll
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     HRSRC hRes = FindResourceW(hInst, MAKEINTRESOURCEW(IDR_WEBVIEW2_DLL), RT_RCDATA);
     if (!hRes) {
@@ -80,7 +81,22 @@ std::wstring WebView2Host::EnsureWebView2LoaderDll() {
     const uint8_t* data = (const uint8_t*)LockResource(hGlob);
     if (!data || size == 0) return L"";
 
-    std::wstring outPath = util::GetTempDir() + L"\\StardustWebView2Loader.dll";
+    std::wstring outPath = util::GetTempDir() + L"\\WebView2Loader.dll";
+    // 已存在且大小一致则复用，避免每次启动都重写（dll 内容固定）
+    DWORD attrs = GetFileAttributesW(outPath.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES) {
+        HANDLE hOld = CreateFileW(outPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hOld != INVALID_HANDLE_VALUE) {
+            DWORD oldSize = GetFileSize(hOld, nullptr);
+            CloseHandle(hOld);
+            if (oldSize == size) {
+                LoadLibraryW(outPath.c_str());
+                return outPath;
+            }
+        }
+    }
+
     HANDLE h = CreateFileW(outPath.c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -94,7 +110,7 @@ std::wstring WebView2Host::EnsureWebView2LoaderDll() {
         util::Log("EnsureWebView2LoaderDll: WriteFile 失败: " + std::to_string(GetLastError()));
         return L"";
     }
-    // LoadLibrary（不保存句柄，进程退出时系统自动清理；启动器短生命周期足够）
+    // 立即加载，让延迟加载器后续 LoadLibrary("WebView2Loader.dll") 命中已加载模块
     if (!LoadLibraryW(outPath.c_str())) {
         util::Log("EnsureWebView2LoaderDll: LoadLibraryW 失败: " + std::to_string(GetLastError()));
         return L"";
@@ -275,25 +291,3 @@ void WebView2Host::Resize() {
         controller_->put_Bounds(r);
     }
 }
-
-// ========== 延迟加载失败钩子（兜底释放 dll） ==========
-// MSVC /DELAYLOAD:WebView2Loader.dll 让 WebView2Loader.dll 在第一次调用
-// WebView2 API 时才 LoadLibrary。若此时 EnsureWebView2LoaderDll 还没跑过
-// （极端时序），loader 会失败；钩子在此场景下从 RCDATA 释放 dll 到 %TEMP%
-// 并返回 HMODULE，让延迟加载器继续解析函数。
-extern "C" {
-FARPROC WINAPI WebView2DelayLoadFailureHook(unsigned int dliNotify, PDelayLoadInfo pdliInfo) {
-    if (dliNotify == dliFailLoadLib && pdliInfo && pdliInfo->szDll
-        && _stricmp(pdliInfo->szDll, "WebView2Loader.dll") == 0) {
-        std::wstring path = WebView2Host::EnsureWebView2LoaderDll();
-        if (!path.empty()) {
-            HMODULE h = LoadLibraryW(path.c_str());
-            if (h) return reinterpret_cast<FARPROC>(h);  // 把我们的 HMODULE 给延迟加载器
-        }
-    }
-    return NULL;  // 让默认错误处理弹窗（其他 dll 失败时仍正常报错）
-}
-
-// 注册到 MSVC 延迟加载器（delayimp.h 已 extern 声明该符号，这里只提供定义）
-PfnDliHook __pfnDliFailureHook2 = WebView2DelayLoadFailureHook;
-} // extern "C"
