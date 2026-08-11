@@ -42,21 +42,19 @@ jobs:
                     ForEach-Object { Split-Path -Parent $_.DirectoryName } | Select-Object -First 1
           if (-not $native) { Write-Error "未找到 build/native/include/WebView2.h"; exit 1 }
 
-          # 定位 WebView2Loader 导入库（import lib）。
-          # 旧版命名 WebView2Loader.lib；新版（>=1.0.2xxx）改名为 WebView2Loader.dll.lib，
-          # 另有 WebView2LoaderStatic.lib（静态库，数十 MB）。优先选显式命名的导入库，
-          # 回退则取 x64 下体积最小的 .lib（导入库仅几 KB，静态库几十 MB）。
+          # 定位 WebView2Loader 链接库。
+          # 优先静态库 WebView2LoaderStatic.lib —— 与 client 项目同款做法：
+          # loader 代码直接编进 exe，运行时不需要 WebView2Loader.dll，程序目录零 dll。
+          # 旧版无 Static 时才回退导入库（WebView2Loader.dll.lib / WebView2Loader.lib，
+          # 那种方案运行时需要 dll，仅作兼容）。
           $x64 = Join-Path $native "x64"
           if (-not (Test-Path $x64)) { Write-Error "未找到 $x64 目录"; exit 1 }
           $loaderLib = $null
-          foreach ($name in @("WebView2Loader.lib", "WebView2Loader.dll.lib")) {
+          foreach ($name in @("WebView2LoaderStatic.lib", "WebView2Loader.dll.lib", "WebView2Loader.lib")) {
             $p = Join-Path $x64 $name
             if (Test-Path $p) { $loaderLib = $p; break }
           }
-          if (-not $loaderLib) {
-            $loaderLib = Get-ChildItem -Path $x64 -Filter *.lib | Sort-Object Length | Select-Object -First 1
-          }
-          if (-not $loaderLib) { Write-Error "未找到 WebView2Loader 导入库（x64 下无 .lib）"; exit 1 }
+          if (-not $loaderLib) { Write-Error "未找到 WebView2Loader 链接库（x64 下无 .lib）"; exit 1 }
 
           Write-Host "WebView2 native dir: $native"
           Write-Host "WebView2 loader lib: $loaderLib"
