@@ -1,5 +1,6 @@
 // 主应用实现：窗口、消息分发、模块协调
 #include "app.h"
+#include "resource.h"   // IDI_APP_ICON 等内嵌资源 ID
 #include "common.h"
 #include "oauth.h"
 #include "java_scanner.h"
@@ -69,8 +70,9 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
 
     cloud_ = new CloudSync(cfg_.serverUrl, cfg_.serverSecret);
 
-    // 注册窗口类
-    WNDCLASSW wc = {0};
+    // 注册窗口类（WNDCLASSEXW 才有 hIconSm 成员）
+    WNDCLASSEXW wc = {0};
+    wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = L"StardustLauncher";
@@ -79,7 +81,7 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
     // ico 最小 32x32，Windows 需要更小时自动缩放）
     wc.hIcon   = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
     wc.hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, 0);
-    RegisterClassW(&wc);
+    RegisterClassExW(&wc);
 
     // 无边框、无系统标题栏的原生应用窗口：
     //   - WS_POPUP：去掉 WS_THICKFRAME 后窗口不可手动拉伸（用户要求）；
