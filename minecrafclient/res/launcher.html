@@ -96,12 +96,6 @@
   .btn.primary:hover{transform:translateY(-2px);box-shadow:0 16px 34px rgba(255,143,199,.55)}
   .btn.primary:active{transform:translateY(0)}
   .btn.ghost{background:var(--glass);border:1px solid var(--stroke);color:var(--text)}
-  /* 轻量提示 toast */
-  .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(12px);
-    background:rgba(20,12,40,.92);border:1px solid var(--stroke);color:#fff;font-size:13px;
-    padding:10px 18px;border-radius:12px;opacity:0;pointer-events:none;transition:all .25s ease;z-index:80;
-    box-shadow:0 8px 30px rgba(0,0,0,.4)}
-  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .btn.ghost:hover{background:var(--glass-strong)}
   .hint{margin-top:16px;font-size:12px;color:var(--muted);text-align:center;line-height:1.6}
 
@@ -363,11 +357,6 @@
               <div class="mem-info">可用内存 <b id="mem-avail">16.0 GB</b> · 推荐 <b id="mem-rec">8G</b></div>
             </div>
 
-            <button class="btn ghost" onclick="rescan()" style="height:44px">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-              重新扫描 Java 与游戏核心
-            </button>
-
             <button class="btn ghost" onclick="showView('home')" style="height:46px">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></svg>
               返回首页
@@ -454,9 +443,6 @@
       }
       if(msg.type==='game:error'){
         alert('启动失败：' + (msg.reason || '未知错误'));
-      }
-      if(msg.type==='sys:rescanned'){
-        toast('已重新扫描 Java 与游戏核心');
       }
     });
   }
@@ -562,20 +548,6 @@
       sel.add(opt);
       alert('请使用启动器本体浏览 Java 的 bin 目录。');
     }
-  }
-
-  function rescan(){
-    if(window.chrome&&chrome.webview){
-      chrome.webview.postMessage(JSON.stringify({type:'sys:rescan'}));
-    } else {
-      toast('请在启动器本体中重新扫描');
-    }
-  }
-  function toast(msg){
-    let t=document.getElementById('toast');
-    if(!t){ t=document.createElement('div'); t.id='toast'; t.className='toast'; document.body.appendChild(t); }
-    t.textContent=msg; t.classList.add('show');
-    clearTimeout(t._timer); t._timer=setTimeout(()=>t.classList.remove('show'),1800);
   }
 
   function renderSettings(){

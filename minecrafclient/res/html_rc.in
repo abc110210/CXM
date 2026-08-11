@@ -1,0 +1,4 @@
+// 由 CMake 配置阶段生成：把内嵌版 HTML（含 base64 背景图）以 RT_HTML 资源编译进 exe。
+// html_rc.rc 生成在 build/ 目录，故用相对路径 ../include/resource.h 指向源码头文件。
+#include "../include/resource.h"
+IDR_APP_HTML HTML "@EMBEDDED_HTML@"

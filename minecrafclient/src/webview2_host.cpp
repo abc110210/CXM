@@ -1,5 +1,6 @@
 // WebView2 封装实现
 #include "webview2_host.h"
+#include "resource.h"
 #include "common.h"
 #include <wrl.h>
 #include <shlwapi.h>
@@ -10,18 +11,47 @@ using namespace Microsoft::WRL;
 WebView2Host::WebView2Host() {}
 WebView2Host::~WebView2Host() {}
 
-HRESULT WebView2Host::Init(HWND hwnd, const std::wstring& htmlFile,
+// 从 exe 资源读取内嵌 HTML（RT_HTML -> IDR_APP_HTML）
+std::wstring WebView2Host::LoadAppHtml() {
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    HRSRC hRes = FindResourceW(hInst, MAKEINTRESOURCE(IDR_APP_HTML), RT_HTML);
+    if (!hRes) {
+        util::Log("LoadAppHtml: FindResourceW(IDR_APP_HTML, RT_HTML) 失败，HTML 未嵌入 exe");
+        return L"";
+    }
+    HGLOBAL hGlob = LoadResource(hInst, hRes);
+    if (!hGlob) {
+        util::Log("LoadAppHtml: LoadResource 失败");
+        return L"";
+    }
+    DWORD size = SizeofResource(hInst, hRes);
+    const char* data = (const char*)LockResource(hGlob);
+    if (!data || size == 0) {
+        util::Log("LoadAppHtml: 资源为空");
+        return L"";
+    }
+    std::string utf8(data, (size_t)size);
+    return util::StringToWString(utf8);
+}
+
+HRESULT WebView2Host::Init(HWND hwnd,
                            MessageHandler onMsg, NavHandler onNav,
                            ReadyHandler onReady, ReadyHandler onNavigated) {
     hwnd_ = hwnd;
-    htmlFile_ = htmlFile;
     onMsg_ = onMsg;
     onNav_ = onNav;
     onReady_ = onReady;
     onNavigated_ = onNavigated;
 
+    // 从 exe 资源读取内嵌 HTML；为空说明资源没编进去，直接报错
+    html_ = LoadAppHtml();
+    if (html_.empty()) {
+        util::Log("Init: 未找到内嵌 HTML 资源，无法启动界面");
+        return E_FAIL;
+    }
+
     // WebView2 缓存、Cookie 等统一放系统临时目录 %TEMP%\StardustWebView2，
-    // 程序目录保持干净，只保留 exe / dll / res / config.ini（与 client 项目同策略）
+    // 程序目录保持干净（与 client 项目同策略）
     std::wstring userData = util::GetWebView2DataDir();
 
     return CreateCoreWebView2EnvironmentWithOptions(
@@ -92,13 +122,8 @@ HRESULT WebView2Host::Init(HWND hwnd, const std::wstring& htmlFile,
                                         return S_OK;
                                     }).Get(), nullptr);
 
-                            // 导航到本地 html（自动转 file:// URL 并编码）
-                            wchar_t url[MAX_PATH] = {0};
-                            DWORD urlLen = MAX_PATH;
-                            if (SUCCEEDED(UrlCreateFromPathW(htmlFile_.c_str(), url, &urlLen, 0)))
-                                webview_->Navigate(url);
-                            else
-                                webview_->Navigate(htmlFile_.c_str());
+                            // 导航到内嵌 HTML（NavigateToString 直接在内存渲染，不依赖外部文件）
+                            webview_->NavigateToString(html_.c_str());
 
                             ready_ = true;
                             if (onReady_) onReady_();
@@ -133,6 +158,12 @@ void WebView2Host::Navigate(const std::wstring& urlOrFile) {
         else
             webview_->Navigate(urlOrFile.c_str());
     }
+}
+
+// OAuth 登录回调后回到启动器首页：重新用内嵌 HTML 渲染
+void WebView2Host::Reload() {
+    if (webview_ && !html_.empty())
+        webview_->NavigateToString(html_.c_str());
 }
 
 void WebView2Host::Resize() {

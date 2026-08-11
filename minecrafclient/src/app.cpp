@@ -77,11 +77,26 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
 
-    hwnd_ = CreateWindowExW(0, L"StardustLauncher", L"寄寄之家启动器",
-                            WS_POPUP | WS_THICKFRAME,
-                            CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800,
+    // 无边框、无系统标题栏的原生应用窗口：
+    //   - WS_POPUP：去掉 WS_THICKFRAME 后窗口不可手动拉伸（用户要求）；
+    //     顶部不再有 DWM 的"假标题栏"白条，WebView2 铺满整个客户区。
+    //   - WS_EX_APPWINDOW：让 WS_POPUP 窗口也出现在任务栏和 Alt-Tab 列表，
+    //     否则最小化后无法从任务栏还原。
+    // 拖动由 HTML 头部 .titlebar 的 -webkit-app-region:drag 实现（点 winbtn 因
+    // app-region:no-drag 仍可点击）。
+    hwnd_ = CreateWindowExW(WS_EX_APPWINDOW, L"StardustLauncher", L"寄寄之家启动器",
+                            WS_POPUP,
+                            0, 0, 1280, 800,
                             nullptr, nullptr, hInstance, this);
     if (!hwnd_) return false;
+
+    // 固定 1280×800，在主屏工作区居中显示（去掉任务栏区域），原生应用基本款
+    RECT wa = {0};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int sw = wa.right - wa.left, sh = wa.bottom - wa.top;
+    int x = wa.left + (sw - 1280) / 2;
+    int y = wa.top  + (sh - 800)  / 2;
+    SetWindowPos(hwnd_, nullptr, x, y, 1280, 800, SWP_NOZORDER | SWP_NOACTIVATE);
 
     ShowWindow(hwnd_, nCmdShow);
     UpdateWindow(hwnd_);
@@ -90,9 +105,8 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
     DWORD corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
-    // 初始化 WebView2
-    std::wstring html = util::GetExeDir() + L"\\res\\launcher.html";
-    webview_.Init(hwnd_, html,
+    // 初始化 WebView2（网页已内嵌进 exe 资源，由 host 自动加载渲染）
+    webview_.Init(hwnd_,
         [this](const std::wstring& json) { OnWebMessage(json); },
         [this](const std::wstring& uri)  { OnNavigate(uri); return true; },
         [this]() { // onReady
@@ -173,15 +187,6 @@ void App::OnWebMessage(const std::wstring& jsonW) {
     else if (type == "java:browse") {
         SelectJavaFolder();
     }
-    else if (type == "sys:rescan") {
-        // 手动重新扫描 Java / 核心，结果写回 ini 并回传前端
-        JavaScanner::Scan(cfg_);
-        CoreScanner::Scan(cfg_);
-        cfg_.Save();
-        SendJavaList();
-        SendCoreList();
-        SendToJs(L"{\"type\":\"sys:rescanned\"}");
-    }
     else if (type == "game:launch") {
         OnJsLaunchGame();
     }
@@ -240,8 +245,8 @@ void App::ParseCallback(const std::wstring& uri) {
         currentPlayer_ = cfg_.currentRole.empty() ? L"Steve_Chan" : cfg_.currentRole;
         pendingLoginSuccess_ = true;
         pendingUsername_ = currentPlayer_;
-        // 导航回启动器首页（NavigationCompleted 里会调用 loginSuccess 切到已登录态）
-        webview_.Navigate(util::GetExeDir() + L"\\res\\launcher.html");
+        // 重新渲染启动器首页（内嵌 HTML，NavigationCompleted 里会调用 loginSuccess 切到已登录态）
+        webview_.Reload();
     } else {
         SendToJs(L"{\"type\":\"oauth:fail\",\"reason\":\"token 换取失败\"}");
     }

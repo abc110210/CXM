@@ -18,8 +18,9 @@ public:
     WebView2Host();
     ~WebView2Host();
 
-    // 初始化 WebView2，hwnd 为承载窗口，htmlFile 为要加载的本地 html 绝对路径
-    HRESULT Init(HWND hwnd, const std::wstring& htmlFile,
+    // 初始化 WebView2，hwnd 为承载窗口。
+    // 网页（launcher.html）已内嵌进 exe 资源（RT_HTML），此处自动读取并 NavigateToString。
+    HRESULT Init(HWND hwnd,
                  MessageHandler onMsg, NavHandler onNav,
                  ReadyHandler onReady, ReadyHandler onNavigated);
 
@@ -29,17 +30,23 @@ public:
     // 在页面里执行 JS 脚本（用于登录后切到已登录态等）
     void ExecuteScript(const std::wstring& js);
 
-    // 导航到指定 URL 或本地文件（自动转 file://）
+    // 导航到指定 URL 或本地文件（自动转 file://）；用于登录页等外部导航
     void Navigate(const std::wstring& urlOrFile);
+
+    // 重新加载内嵌 HTML（OAuth 登录回调后回到启动器首页用）
+    void Reload();
 
     // 窗口尺寸变化时调用
     void Resize();
 
 private:
+    // 从当前 exe 资源读取内嵌 HTML（RT_HTML -> IDR_APP_HTML），失败返回空串
+    static std::wstring LoadAppHtml();
+
     Microsoft::WRL::ComPtr<ICoreWebView2> webview_;
     Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;
     HWND hwnd_ = nullptr;
-    std::wstring htmlFile_;
+    std::wstring html_;          // 内嵌 HTML 内容（NavigateToString 渲染）
     MessageHandler onMsg_;
     NavHandler onNav_;
     ReadyHandler onReady_;

@@ -2,7 +2,8 @@
 # WebView2 SDK 通过官方 NuGet 包 Microsoft.Web.WebView2 提供（CI 中下载并解压），
 # 不再依赖 vcpkg，构建更快更可控。
 cmake_minimum_required(VERSION 3.20)
-project(StardustLauncher CXX)
+# RC 语言用于把内嵌 HTML 以 RT_HTML 资源编译进 exe（网页不再放程序目录）
+project(StardustLauncher CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,11 +40,35 @@ if(NOT EXISTS "${WV_LIB}")
     "旧版为 WebView2Loader.lib；请在 CI 中通过 -DWEBVIEW2_LOADER_LIB 传入真实路径。")
 endif()
 
+# ---------- 生成内嵌版 HTML（背景图 base64 注入）----------
+# WebView2 用 NavigateToString 渲染内嵌 HTML，无法引用外部文件，
+# 故由 tools/embed_html.py 在构建时把 background.png 转 data URI 内联进 HTML。
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(EMBEDDED_HTML "${CMAKE_CURRENT_BINARY_DIR}/embedded/launcher.html")
+execute_process(
+    COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_html.py"
+            --html "${CMAKE_CURRENT_SOURCE_DIR}/res/launcher.html"
+            --png  "${CMAKE_CURRENT_SOURCE_DIR}/res/background.png"
+            --out  "${EMBEDDED_HTML}"
+    RESULT_VARIABLE EMBED_RC
+    COMMENT "内嵌背景图到 HTML（base64）"
+)
+if(NOT EMBED_RC EQUAL 0)
+    message(FATAL_ERROR "生成内嵌版 HTML 失败（embed_html.py 退出码 ${EMBED_RC}）")
+endif()
+
+# 生成 RC：把内嵌版 HTML 以 RT_HTML 资源编译进 exe
+# 用原生反斜杠路径，并把每个反斜杠转义成 \\，避免 RC 编译器把 \a \t 等当转义序列
+file(TO_NATIVE_PATH "${EMBEDDED_HTML}" EMBEDDED_HTML_NATIVE)
+string(REPLACE "\\" "\\\\" EMBEDDED_HTML "${EMBEDDED_HTML_NATIVE}")
+configure_file(res/html_rc.in "${CMAKE_CURRENT_BINARY_DIR}/html_rc.rc" @ONLY)
+
 # ---------- 收集源文件 ----------
 file(GLOB SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
 add_executable(StardustLauncher WIN32 ${SRC_FILES}
     "${CMAKE_CURRENT_SOURCE_DIR}/res/app.manifest"
+    "${CMAKE_CURRENT_BINARY_DIR}/html_rc.rc"
 )
 
 target_include_directories(StardustLauncher PRIVATE
@@ -60,14 +85,8 @@ target_link_libraries(StardustLauncher PRIVATE
     dwmapi
 )
 
-# ---------- 复制资源目录到输出目录 ----------
-# WebView2 以本地文件方式加载 res/launcher.html，需要保证 exe 旁边有 res/ 文件夹
-add_custom_command(TARGET StardustLauncher POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/res
-        $<TARGET_FILE_DIR:StardustLauncher>/res
-    COMMENT "复制 res 资源到输出目录"
-)
+# ---------- 资源已内嵌进 exe，不再复制 res\ 到输出目录 ----------
+# 网页（launcher.html）与背景图已编译进 exe（RT_HTML 资源），程序目录不再需要 res\。
 
 # ---------- 复制 WebView2 运行库 WebView2Loader.dll ----------
 if(EXISTS "${WV_DLL}")

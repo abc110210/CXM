@@ -2,7 +2,6 @@
 #include "java_scanner.h"
 #include "common.h"
 #include <windows.h>
-#include <cstdio>
 #include <algorithm>
 
 void JavaScanner::AddIfValid(std::vector<JavaInfo>& out, const std::wstring& javaExe) {
@@ -19,15 +18,59 @@ void JavaScanner::AddIfValid(std::vector<JavaInfo>& out, const std::wstring& jav
 }
 
 std::wstring JavaScanner::QueryVersion(const std::wstring& javaExe) {
-    // 执行 "java -version" 并把 stderr 合并到 stdout 读取
-    std::wstring cmd = L"\"" + javaExe + L"\" -version 2>&1";
-    FILE* pipe = _wpopen(cmd.c_str(), L"r");
-    std::wstring line;
-    if (pipe) {
-        wchar_t buf[512];
-        while (fgetws(buf, 512, pipe)) line += buf;
-        _pclose(pipe);
+    // 后台运行 "java -version" 并读取输出（stderr 并入）。
+    // 注意：不能用 _wpopen/system —— 那会为子进程新建一个控制台窗口，
+    // 首次扫描有几个 Java 就闪几个黑窗。改用 CreateProcess + CREATE_NO_WINDOW
+    // 隐藏运行，结果通过管道读回（与 game_launcher 启动游戏同款方式）。
+    HANDLE hRead = nullptr, hWrite = nullptr;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+        return javaExe.substr(javaExe.rfind(L"\\") + 1);
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);  // 读端不继承
+
+    STARTUPINFOW si = { sizeof(si) };
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.hStdOutput = hWrite;
+    si.hStdError  = hWrite;   // java -version 输出到 stderr，合并到同一管道
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    si.wShowWindow = SW_HIDE;
+
+    // 命令行写法：外层引号 + 内层带引号路径，保证含空格路径被正确解析
+    std::wstring cmdLine = L"\"\"" + javaExe + L"\" -version\"";
+    PROCESS_INFORMATION pi = { 0 };
+    if (!CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(hRead);
+        CloseHandle(hWrite);
+        return javaExe.substr(javaExe.rfind(L"\\") + 1);
     }
+    CloseHandle(hWrite);  // 父进程关闭写端，否则 ReadFile 读不到 EOF 会一直阻塞
+
+    std::wstring line;
+    char buf[512];
+    DWORD got = 0;
+    while (ReadFile(hRead, buf, sizeof(buf) - 1, &got, nullptr) && got > 0) {
+        buf[got] = '\0';
+        // 优先按 UTF-8 解码，失败再按系统 ANSI 代码页（旧版 Java 输出可能是 GBK）
+        int need = MultiByteToWideChar(CP_UTF8, 0, buf, got, nullptr, 0);
+        if (need > 0) {
+            std::wstring w(need, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, buf, got, &w[0], need);
+            line += w;
+        } else {
+            int n2 = MultiByteToWideChar(CP_ACP, 0, buf, got, nullptr, 0);
+            if (n2 > 0) {
+                std::wstring w(n2, L'\0');
+                MultiByteToWideChar(CP_ACP, 0, buf, got, &w[0], n2);
+                line += w;
+            }
+        }
+    }
+    CloseHandle(hRead);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
     if (line.empty()) return javaExe.substr(javaExe.rfind(L"\\") + 1);
     // 取第一行，形如 "java version "1.8.0_401"" 或 "openjdk version "21.0.3""
     size_t nl = line.find(L'\n');
