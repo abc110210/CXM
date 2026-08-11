@@ -5,6 +5,7 @@
 #include <wrl.h>
 #include <shlwapi.h>
 #include <string>
+#include <cstring>    // _stricmp
 #include <vector>
 #include <delayimp.h>   // delayload 钩子（运行期 dll 释放兜底）
 
