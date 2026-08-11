@@ -103,7 +103,7 @@ target_link_libraries(StardustLauncher PRIVATE
     bcrypt
     version
     dwmapi
-    delayhlp   # delayload helper（/DELAYLOAD:WebView2Loader.dll 需要）
+    delayimp   # MSVC 延迟加载辅助库（/DELAYLOAD:WebView2Loader.dll 需要）
 )
 
 # 关键：延迟加载 WebView2Loader.dll
