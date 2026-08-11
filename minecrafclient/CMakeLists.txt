@@ -70,6 +70,10 @@ add_executable(StardustLauncher WIN32 ${SRC_FILES}
     "${CMAKE_CURRENT_BINARY_DIR}/html_rc.rc"
 )
 
+# Windows 工程标配：走宽字符 API（否则 MAKEINTRESOURCE 展开成 ANSI 版 LPSTR，
+# 传给 FindResourceW 等 W 函数会 C2664）
+target_compile_definitions(StardustLauncher PRIVATE UNICODE _UNICODE)
+
 target_include_directories(StardustLauncher PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${WV_INCLUDE}
