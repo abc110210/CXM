@@ -6,7 +6,7 @@
 //   IDR_WEBVIEW2_DLL   RCDATA   WebView2Loader.dll（运行时释放到 %TEMP% 后 LoadLibrary）
 // html_rc.rc 生成在 build/ 目录，故用相对路径 ../include/resource.h。
 #include "../include/resource.h"
-IDI_APP_ICON       ICON    "@EMBEDDED_ICO@"
-IDR_APP_HTML       HTML    "@EMBEDDED_HTML@"
-IDR_BG_PNG         RCDATA  "@EMBEDDED_PNG@"
-IDR_WEBVIEW2_DLL   RCDATA  "@EMBEDDED_DLL@"
+IDI_APP_ICON       ICON    "@EMBEDDED_ICO_RC@"
+IDR_APP_HTML       HTML    "@EMBEDDED_HTML_RC@"
+IDR_BG_PNG         RCDATA  "@EMBEDDED_PNG_RC@"
+IDR_WEBVIEW2_DLL   RCDATA  "@EMBEDDED_DLL_RC@"
