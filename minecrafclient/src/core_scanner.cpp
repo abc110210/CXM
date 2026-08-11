@@ -30,21 +30,23 @@ void CoreScanner::Scan(Config& cfg) {
         std::wstring jarPattern = verDir + L"\\*.jar";
         WIN32_FIND_DATAW jfd; HANDLE jh = FindFirstFileW(jarPattern.c_str(), &jfd);
         if (jh == INVALID_HANDLE_VALUE) continue;
-        LARGE_INTEGER size; size.QuadPart = 0;
+        // 注意：必须在 FindClose 之前把文件名取出来 —— FindClose 后
+        // jfd.cFileName 的内容不再保证有效（旧代码在关闭后才读，属未定义行为）
+        std::wstring jarName;
         do {
             LARGE_INTEGER s; s.LowPart = jfd.nFileSizeLow; s.HighPart = (LONG)jfd.nFileSizeHigh;
             if (s.QuadPart > 10LL * 1024 * 1024) { // 大于 10MB 判定为核心
-                size = s;
+                jarName = jfd.cFileName;
                 break;
             }
         } while (FindNextFileW(jh, &jfd));
         FindClose(jh);
 
-        if (size.QuadPart > 0) {
+        if (!jarName.empty()) {
             CoreInfo ci;
             ci.name = name;
             ci.dir = verDir;
-            ci.jar = verDir + L"\\" + std::wstring(jfd.cFileName);
+            ci.jar = verDir + L"\\" + jarName;
             out.push_back(ci);
         }
     } while (FindNextFileW(h, &fd));

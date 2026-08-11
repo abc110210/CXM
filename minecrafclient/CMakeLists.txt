@@ -39,9 +39,9 @@ if(NOT EXISTS "${WV_LIB}")
 endif()
 
 # ---------- 生成内嵌版 HTML（背景图改为占位符）----------
-# WebView2 用 NavigateToString 渲染内嵌 HTML，对超大 HTML 会静默失败（白屏）。
-# 故 HTML 本体始终保持 < 50KB：背景图另作 RCDATA 资源，运行时由 C++ 注入。
-# 同样把 WebView2Loader.dll 也作为 RCDATA 嵌入，运行时释放到 %TEMP% 后
+# HTML 通过虚拟域名 https://app.stardust.local/* 的 WebResourceRequested 拦截返回给页面
+# （webview2_host.cpp），故 HTML 本体保持 < 50KB 更稳：背景图另作 RCDATA 资源，
+# 运行时由 C++ 注入。同样把 WebView2Loader.dll 也作为 RCDATA 嵌入，运行时释放到 %TEMP% 后
 # LoadLibrary，程序目录不再需要任何外部 dll。
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 

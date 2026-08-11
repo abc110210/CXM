@@ -26,6 +26,7 @@ private:
     void SelectJavaFolder();                        // 弹文件夹选择框选 Java bin
     void SendJavaList();                            // 回传 Java 列表给前端
     void SendCoreList();                            // 回传核心列表给前端
+    void SendMemInfo();                             // 回传物理内存信息给前端
 
     HWND hwnd_ = nullptr;
     HINSTANCE hinst_ = nullptr;

@@ -4,6 +4,7 @@
 #include <wrl.h>
 #include <WebView2.h>
 #include <string>
+#include <vector>
 #include <functional>
 
 class WebView2Host {
@@ -19,7 +20,8 @@ public:
     ~WebView2Host();
 
     // 初始化 WebView2，hwnd 为承载窗口。
-    // 网页（launcher.html）已内嵌进 exe 资源（RT_HTML），此处自动读取并 NavigateToString。
+    // 网页（launcher.html）已内嵌进 exe 资源（RT_HTML），通过拦截虚拟域名
+    // https://app.stardust.local/* 返回给页面加载。
     HRESULT Init(HWND hwnd,
                  MessageHandler onMsg, NavHandler onNav,
                  ReadyHandler onReady, ReadyHandler onNavigated);
@@ -36,6 +38,10 @@ public:
     // 重新加载内嵌 HTML（OAuth 登录回调后回到启动器首页用）
     // bootError 非空时把错误原因注入页面，由 JS 用原生 toast 显示（避免被重载冲掉）
     void Reload(const std::wstring& bootError = L"");
+
+    // 内嵌页面使用的虚拟域名：页面 origin 固定，localStorage / postMessage 全部可用
+    // （NavigateToString 的 opaque origin 会让 localStorage 抛异常，导致 JS 整体中断）
+    static const wchar_t* kAppHost;
 
     // 窗口尺寸变化时调用
     void Resize();
@@ -55,7 +61,8 @@ private:
     Microsoft::WRL::ComPtr<ICoreWebView2> webview_;
     Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;
     HWND hwnd_ = nullptr;
-    std::wstring html_;          // 内嵌 HTML 内容（NavigateToString 渲染）
+    std::wstring html_;          // 内嵌 HTML 内容（通过 WebResourceRequested 拦截虚拟域名返回）
+    std::wstring bootError_;     // 待注入页面的启动错误原因（Reload 时设置，拦截回调中消费后清空）
     MessageHandler onMsg_;
     NavHandler onNav_;
     ReadyHandler onReady_;

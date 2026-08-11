@@ -58,6 +58,26 @@ static std::wstring JsonEscape(const std::wstring& s) {
     return out;
 }
 
+// JS 单引号字符串转义（用于把用户名等拼进 ExecuteScript 的 JS 源码）
+static std::wstring JsEscape(const std::wstring& s) {
+    std::wstring out;
+    for (wchar_t c : s) {
+        if (c == L'\\' || c == L'\'') out += L'\\';
+        out += c;
+    }
+    return out;
+}
+
+// 判断 Java 缓存是否"失效"（显示名是原始文件名而非版本号，说明上次查询失败）
+static bool JavaListStale(const Config& cfg) {
+    for (const auto& j : cfg.javaList) {
+        // 版本号形如 "java version 1.8.0_401" / "openjdk version 21.0.3"
+        bool hasVersion = j.display.find(L"version") != std::wstring::npos;
+        if (!hasVersion) return true;
+    }
+    return false;
+}
+
 // 从 URI 的 Query String 取某个参数（不做完整 URL decode，仅用于错误展示）
 static std::wstring GetQueryParam(const std::wstring& uri, const std::wstring& key) {
     std::wstring prefix1 = L"?" + key + L"=";
@@ -78,8 +98,10 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
     // 读取配置（含上次扫描缓存）
     cfg_.Load();
 
-    // 首次或缓存为空时扫描 Java / 核心
-    if (cfg_.javaList.empty()) JavaScanner::Scan(cfg_);
+    // 首次或缓存为空/失效时扫描 Java / 核心。
+    // 失效判定：缓存的显示名是原始文件名（如 "java.exe"）说明上次版本查询失败，
+    // 重扫一次以拿到真正的版本号。
+    if (cfg_.javaList.empty() || JavaListStale(cfg_)) JavaScanner::Scan(cfg_);
     if (cfg_.coreList.empty()) CoreScanner::Scan(cfg_);
     cfg_.Save();
 
@@ -130,28 +152,16 @@ bool App::Init(HINSTANCE hInstance, int nCmdShow) {
     HRESULT hrInit = webview_.Init(hwnd_,
         [this](const std::wstring& json) { OnWebMessage(json); },
         [this](const std::wstring& uri)  { OnNavigate(uri); return true; },
-        [this]() { // onReady
-            // 把系统信息推给前端
-            SendJavaList();
-            SendCoreList();
-
-            MEMORYSTATUSEX mem = { sizeof(mem) };
-            GlobalMemoryStatusEx(&mem);
-            double totalGB = (double)mem.ullTotalPhys / (1024.0 * 1024 * 1024);
-            int total = (int)(totalGB + 0.5);                 // 四舍五入取整
-            int recommended = total / 2;                      // 推荐分配约一半物理内存
-            if (recommended < 2) recommended = 2;             // 至少 2G
-            if (recommended > 16) recommended = 16;           // 封顶 16G
-            std::wstring memJson = L"{\"type\":\"sys:memory\",\"totalGB\":" +
-                std::to_wstring(total) + L",\"recommendedG\":" +
-                std::to_wstring(recommended) + L"}";
-            SendToJs(memJson);
+        [this]() { // onReady：仅作占位，系统信息改在 NavigationCompleted 后推送
         },
-        [this]() { // onNavigated
+        [this]() { // onNavigated：页面 JS 已就绪，此时推送才不会被丢弃
             if (pendingLoginSuccess_) {
                 pendingLoginSuccess_ = false;
-                webview_.ExecuteScript(L"loginSuccess('" + pendingUsername_ + L"')");
+                webview_.ExecuteScript(L"loginSuccess('" + JsEscape(pendingUsername_) + L"')");
             }
+            SendJavaList();
+            SendCoreList();
+            SendMemInfo();
         });
     if (FAILED(hrInit)) {
         // 给用户一个明确提示，避免再次出现"白屏但不知为何"
@@ -215,7 +225,16 @@ void App::OnWebMessage(const std::wstring& jsonW) {
     }
     else if (type == "config:set") {
         std::string key = ExtractString(json, "key");
+        std::string val = ExtractString(json, "value");
         if (key == "memory_mb") { cfg_.memoryMb = (int)ExtractInt(json, "value"); cfg_.Save(); }
+        else if (key == "selected_core") { cfg_.selectedCore = util::StringToWString(val); cfg_.Save(); }
+        else if (key == "selected_java") { cfg_.selectedJava = util::StringToWString(val); cfg_.Save(); }
+    }
+    else if (type == "sys:init") {
+        // 页面初始化完成，主动拉取系统信息（与 NavigationCompleted 推送双保险）
+        SendJavaList();
+        SendCoreList();
+        SendMemInfo();
     }
     else if (type == "java:browse") {
         SelectJavaFolder();
@@ -255,6 +274,7 @@ void App::OnWebMessage(const std::wstring& jsonW) {
 // ---------------- OAuth 登录 ----------------
 void App::DoOAuthLogin() {
     OAuth oauth(cfg_);
+    SendToJs(L"{\"type\":\"oauth:starting\"}");   // 提示"正在打开授权页"，避免看起来像没反应
     webview_.Navigate(oauth.BuildAuthorizeUrl());
 }
 
@@ -289,10 +309,12 @@ void App::ParseCallback(const std::wstring& uri) {
         currentPlayer_ = cfg_.currentRole.empty() ? L"Steve_Chan" : cfg_.currentRole;
         pendingLoginSuccess_ = true;
         pendingUsername_ = currentPlayer_;
-        // 重新渲染启动器首页（内嵌 HTML，NavigationCompleted 里会调用 loginSuccess 切到已登录态）
+        // 重新渲染启动器首页（NavigationCompleted 里会调用 loginSuccess 切到已登录态）
         webview_.Reload();
     } else {
         SendToJs(L"{\"type\":\"oauth:fail\",\"reason\":\"token 换取失败\"}");
+        // 回到首页并提示（此时页面还在 LittleSkin，bootError 由拦截器注入，回首页后 toast 显示）
+        webview_.Reload(L"token 换取失败，请重试");
     }
 }
 
@@ -356,11 +378,14 @@ void App::OnGameExit() {
 }
 
 // ---------------- 回传列表给前端 ----------------
+// 结构化发送：显示名（text）+ 唯一值（value，java 用 exe 路径、core 用目录），
+// JS 端 change 时把 value 回传保存到 config，避免"选了但没记住"。
 void App::SendJavaList() {
     std::wstring jl = L"{\"type\":\"sys:java\",\"list\":[";
     for (size_t i = 0; i < cfg_.javaList.size(); ++i) {
         if (i) jl += L",";
-        jl += L"\"" + JsonEscape(cfg_.javaList[i].display) + L"\"";
+        jl += L"{\"name\":\"" + JsonEscape(cfg_.javaList[i].display) +
+              L"\",\"value\":\"" + JsonEscape(cfg_.javaList[i].javaExe) + L"\"}";
     }
     jl += L"]}";
     SendToJs(jl);
@@ -370,10 +395,26 @@ void App::SendCoreList() {
     std::wstring cl = L"{\"type\":\"sys:cores\",\"list\":[";
     for (size_t i = 0; i < cfg_.coreList.size(); ++i) {
         if (i) cl += L",";
-        cl += L"\"" + JsonEscape(cfg_.coreList[i].name) + L"\"";
+        cl += L"{\"name\":\"" + JsonEscape(cfg_.coreList[i].name) +
+              L"\",\"value\":\"" + JsonEscape(cfg_.coreList[i].dir) + L"\"}";
     }
     cl += L"]}";
     SendToJs(cl);
+}
+
+// 把物理内存总量与推荐分配推给前端（round 到整数 GB）
+void App::SendMemInfo() {
+    MEMORYSTATUSEX mem = { sizeof(mem) };
+    GlobalMemoryStatusEx(&mem);
+    double totalGB = (double)mem.ullTotalPhys / (1024.0 * 1024 * 1024);
+    int total = (int)(totalGB + 0.5);                 // 四舍五入取整
+    int recommended = total / 2;                      // 推荐分配约一半物理内存
+    if (recommended < 2) recommended = 2;             // 至少 2G
+    if (recommended > 16) recommended = 16;           // 封顶 16G
+    std::wstring memJson = L"{\"type\":\"sys:memory\",\"totalGB\":" +
+        std::to_wstring(total) + L",\"recommendedG\":" +
+        std::to_wstring(recommended) + L"}";
+    SendToJs(memJson);
 }
 
 // ---------------- 选择 Java 文件夹 ----------------

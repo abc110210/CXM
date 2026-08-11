@@ -37,22 +37,19 @@
       var(--bg,url("BG_PLACEHOLDER")) center/cover no-repeat}
   .bg::after{content:"";position:absolute;inset:0;
       background:radial-gradient(120% 80% at 50% 0%,transparent 30%,rgba(26,16,48,.60) 100%)}
-  /* 花瓣动画：减少到 8 个 + 限制运行 30 秒后自动停止，避免 GPU 合成层长时间累积崩溃 */
-  .petals{position:fixed;inset:0;pointer-events:none;overflow:hidden;z-index:5}
-  .petal{position:absolute;top:-20px;width:12px;height:12px;opacity:.8;
-    background:radial-gradient(circle at 30% 30%,#ffd6ec,#ff9ecb);
-    border-radius:12px 1px 12px 1px;animation:fall linear infinite;will-change:transform}
-  @keyframes fall{0%{transform:translateY(-20px) translateX(0) rotate(0)}
-    100%{transform:translateY(105vh) translateX(40px) rotate(360deg)}}
-  .petals.stopped .petal{animation:none;opacity:0;transition:opacity 1s}
+  /* 花瓣动画已整体移除：无限 CSS 动画会在 WebView2 中累积 GPU 合成层，
+     运行一段时间后导致渲染进程崩溃（黑屏）。去掉后界面更接近原生应用。 */
 
   .app{position:fixed;inset:0;display:flex;flex-direction:column}
 
-  /* 标题栏：拖拽完全由 C++ WM_NCHITTEST 管理（更可靠），不用 -webkit-app-region */
+  /* 标题栏：-webkit-app-region:drag 让 WebView2 自行把该区域上报为可拖动（HTCAPTION），
+     比 C++ 侧 WM_NCHITTEST 可靠（WebView2 子窗口会拦截自身的命中测试）；
+     按钮必须 no-drag，否则点不到。 */
   .titlebar{height:44px;flex:0 0 44px;display:flex;align-items:center;
     padding:0 14px;gap:10px;
     background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,0));
-    border-bottom:1px solid var(--stroke);z-index:20}
+    border-bottom:1px solid var(--stroke);z-index:20;
+    -webkit-app-region:drag;app-region:drag;user-select:none}
   .logo{width:22px;height:22px;border-radius:7px;background:var(--logo,var(--accent));
     background-size:cover;background-position:center;
     box-shadow:0 0 14px rgba(185,140,255,.8);position:relative;flex:0 0 auto}
@@ -60,7 +57,8 @@
   .title small{font-weight:400;color:var(--muted);font-size:11px;margin-left:6px}
   .winbar{margin-left:auto;display:flex;gap:8px}
   .winbtn{width:30px;height:28px;border:none;border-radius:8px;cursor:pointer;
-    background:var(--glass);color:var(--text);display:grid;place-items:center;transition:.18s}
+    background:var(--glass);color:var(--text);display:grid;place-items:center;transition:.18s;
+    -webkit-app-region:no-drag;app-region:no-drag}
   .winbtn:hover{background:var(--glass-strong)}
   .winbtn.close:hover{background:#ff5d7a}
 
@@ -222,7 +220,6 @@
 </head>
 <body>
   <div class="bg"></div>
-  <div class="petals" id="petals"></div>
   <div class="toast-wrap" id="toastWrap"></div>
 
   <div class="app">
@@ -258,7 +255,7 @@
           <div class="card" id="home-login">
             <div class="eyebrow">LittleSkin 登录</div>
             <h1>登录<span class="grad">寄寄之家</span></h1>
-            <p class="sub">本启动器专为 LittleSkin 外置登录打造。在下方输入你的 LittleSkin 账号密码即可登录。</p>
+            <p class="sub">点击「登录」将跳转到 LittleSkin 官网完成授权。账号密码由官方页面验证，本启动器不存储你的密码。</p>
 
             <div class="field">
               <label>邮箱 / 用户名</label>
@@ -266,7 +263,7 @@
             </div>
             <div class="field">
               <label>密码</label>
-              <input class="control" id="login-pass" type="password" placeholder="请输入密码" />
+              <input class="control" id="login-pass" type="password" placeholder="授权跳转时无需输入，可留空" />
             </div>
 
             <button class="btn primary" onclick="doLogin()">
@@ -343,20 +340,15 @@
             <div class="field">
               <label>游戏版本（从 .minecraft\versions 扫描）</label>
               <select class="control" id="coreSelect">
-                <option>1.21.4 · 最新正式版</option>
-                <option>1.20.1 · 稳定版</option>
-                <option>NeoForge 1.21.1</option>
-                <option>Fabric 1.21.4</option>
+                <option>正在扫描游戏版本…</option>
               </select>
-              <div class="note">启动器与 .minecraft 同目录，首次扫描 versions 文件夹下大于 10MB 的 jar 作为核心；结果写入配置文件，下次直接读取。</div>
+              <div class="note">自动扫描 versions 文件夹下大于 10MB 的 jar 作为核心；结果写入配置文件，下次直接读取。</div>
             </div>
 
             <div class="field">
               <label>Java 运行环境</label>
               <select class="control" id="javaSelect">
-                <option>Java 21.0.3 (Adoptium) — 推荐</option>
-                <option>Java 17.0.9 (Oracle)</option>
-                <option>Java 8u401 (Azul Zulu)</option>
+                <option>正在扫描 Java…</option>
               </select>
               <div class="note">自动扫描：JAVA_HOME、注册表、常见安装目录、PATH 中所有 java.exe；结果缓存到配置文件。</div>
             </div>
@@ -415,6 +407,8 @@
   let playing=false, startTs=0, timerId=null;
   let currentRole = localStorage.getItem(LS.role)||'默认角色';
   let currentMem = parseInt(localStorage.getItem(LS.mem)||'8192',10);
+  let currentCore = localStorage.getItem('ls_core')||'';
+  let currentJava = localStorage.getItem('ls_java')||'';
   let sysTotalGB = 0;   // C++ 初始化时通过 sys:memory 推来的物理总内存（GB）
   let sysRecG = 8;      // 推荐分配内存（GB），由 C++ 按真实内存计算
 
@@ -473,12 +467,10 @@
         if(rEl) rEl.textContent = sysRecG+'G';
       }
       if(msg.type==='sys:java'){
-        const sel=document.getElementById('javaSelect'); sel.innerHTML='';
-        (msg.list||[]).forEach((j,idx)=>{ const o=document.createElement('option'); o.text=j; if(idx===0) o.selected=true; sel.add(o); });
+        fillJavaList(msg.list||[]);
       }
       if(msg.type==='sys:cores'){
-        const sel=document.getElementById('coreSelect'); sel.innerHTML='';
-        (msg.list||[]).forEach((c,idx)=>{ const o=document.createElement('option'); o.text=c; if(idx===0) o.selected=true; sel.add(o); });
+        fillCoreList(msg.list||[]);
       }
       if(msg.type==='cloud:playtime:got'){
         // C++ 从服务端拿到累计时长后推回来（秒）
@@ -492,6 +484,9 @@
       }
       if(msg.type==='oauth:fail'){
         showToast('登录失败：' + (msg.reason || '未知错误'), 'error');
+      }
+      if(msg.type==='oauth:starting'){
+        showToast('正在打开 LittleSkin 授权页…', 'info');
       }
       if(msg.type==='game:error'){
         showToast('启动失败：' + (msg.reason || '未知错误'), 'error');
@@ -549,8 +544,10 @@
 
   /* ===================== 登录 / 注册 ===================== */
   function doLogin(){
+    // OAuth 授权码流程：账号密码在 LittleSkin 官方授权页输入，
+    // 这里仅校验用户名非空后跳转（预览模式直接模拟登录成功）
     const u=document.getElementById('login-user').value.trim();
-    if(!u){ showToast('请输入账号', 'warn'); return; }
+    if(!u){ showToast('请输入 LittleSkin 账号（密码在授权页输入）', 'warn'); return; }
     if(window.chrome&&chrome.webview){
       chrome.webview.postMessage(JSON.stringify({type:'oauth:login',provider:'littleskin',username:u}));
       return;
@@ -615,6 +612,25 @@
   function openExternal(url){ if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'browser:open',url})); }
 
   /* ===================== Java / 内存 ===================== */
+  // 用 C++ 扫描结果填充 Java 下拉框；无结果时给出提示而非空列表
+  function fillJavaList(list){
+    const sel=document.getElementById('javaSelect'); if(!sel) return;
+    sel.innerHTML='';
+    if(!list.length){ const o=document.createElement('option'); o.text='未检测到 Java，可手动选择'; sel.add(o); return; }
+    list.forEach((j)=>{ const o=document.createElement('option');
+      o.value=j.value; o.text=j.name; if(j.value===currentJava) o.selected=true; sel.add(o); });
+    if(!currentJava) sel.selectedIndex=0;
+  }
+  // 用 C++ 扫描结果填充游戏版本下拉框
+  function fillCoreList(list){
+    const sel=document.getElementById('coreSelect'); if(!sel) return;
+    sel.innerHTML='';
+    if(!list.length){ const o=document.createElement('option'); o.text='未检测到游戏核心'; sel.add(o); return; }
+    list.forEach((c)=>{ const o=document.createElement('option');
+      o.value=c.value; o.text=c.name; if(c.value===currentCore) o.selected=true; sel.add(o); });
+    if(!currentCore) sel.selectedIndex=0;
+  }
+
   function browseJava(){
     if(window.chrome&&chrome.webview){
       chrome.webview.postMessage(JSON.stringify({type:'java:browse'}));
@@ -632,6 +648,10 @@
     const total = sysTotalGB>0 ? sysTotalGB : (navigator.deviceMemory||16);
     document.getElementById('mem-avail').textContent = total + ' GB';
     document.getElementById('mem-rec').textContent = sysRecG + 'G';
+    // 恢复上次选择的 Java / 版本
+    const cs=document.getElementById('coreSelect'), js=document.getElementById('javaSelect');
+    if(cs.options.length && currentCore){ for(const o of cs.options){ if(o.value===currentCore){ cs.selectedIndex=o.index; break; } } }
+    if(js.options.length && currentJava){ for(const o of js.options){ if(o.value===currentJava){ js.selectedIndex=o.index; break; } } }
   }
   try {
     document.querySelectorAll('.mem-presets .chip-btn').forEach(btn=>{
@@ -641,6 +661,17 @@
       });
     });
   } catch(e){ console.error('mem-presets setup:', e); }
+  // 选择 Java / 版本时保存并同步给 C++（下次启动直接用，不会丢）
+  try {
+    document.getElementById('coreSelect').addEventListener('change', function(){
+      currentCore = this.value || ''; localStorage.setItem('ls_core', currentCore);
+      if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'config:set',key:'selected_core',value:currentCore}));
+    });
+    document.getElementById('javaSelect').addEventListener('change', function(){
+      currentJava = this.value || ''; localStorage.setItem('ls_java', currentJava);
+      if(window.chrome&&chrome.webview) chrome.webview.postMessage(JSON.stringify({type:'config:set',key:'selected_java',value:currentJava}));
+    });
+  } catch(e){ console.error('select setup:', e); }
   function setMem(v){
     currentMem=v; localStorage.setItem(LS.mem,String(v));
     document.getElementById('memInput').value=v;
@@ -749,15 +780,9 @@
     (function(){
       // OAuth 失败等场景：C++ 重载页面时会把错误原因注入 window.__bootError，这里原生化显示
       if(window.__bootError){ showToast(window.__bootError, 'error'); window.__bootError=null; }
-      const box=document.getElementById('petals');
-      if(box){
-        // 花瓣数量从 18 减到 8，减轻 GPU 合成层压力
-        for(let i=0;i<8;i++){ const p=document.createElement('div'); p.className='petal';
-          p.style.left=Math.random()*100+'vw'; p.style.animationDuration=(6+Math.random()*7)+'s';
-          p.style.animationDelay=(-Math.random()*10)+'s'; p.style.transform='scale('+(0.6+Math.random()*0.8)+')';
-          box.appendChild(p); }
-        // 30 秒后停止花瓣动画，避免无限 CSS 动画导致 GPU 渲染崩溃（黑屏）
-        setTimeout(function(){ box.classList.add('stopped'); }, 30000);
+      // 主动向 C++ 拉取系统信息（Java / 版本 / 内存），与 C++ 端 NavigationCompleted 推送双保险
+      if(window.chrome&&chrome.webview){
+        chrome.webview.postMessage(JSON.stringify({type:'sys:init'}));
       }
       if(logged){
         setText('st-user', localStorage.getItem(LS.name)||'Steve_Chan');

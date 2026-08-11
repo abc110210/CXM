@@ -9,6 +9,24 @@
 OAuth::OAuth(const Config& cfg)
     : clientId_(cfg.clientId), clientSecret_(cfg.clientSecret), redirectUri_(cfg.redirectUri) {}
 
+// 对自定义协议回调地址做最小 URL 编码（: / ? = & 等保留字符编码为 %XX），
+// 避免某些 OAuth 服务器拒绝未编码的 redirect_uri
+static std::wstring UrlEncode(const std::wstring& s) {
+    static const wchar_t* hex = L"0123456789ABCDEF";
+    std::wstring out;
+    for (wchar_t c : s) {
+        if ((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') ||
+            (c >= L'0' && c <= L'9') || c == L'-' || c == L'_' || c == L'.' || c == L'~') {
+            out += c;
+        } else {
+            out += L'%';
+            out += hex[(unsigned char)c >> 4];
+            out += hex[(unsigned char)c & 0xF];
+        }
+    }
+    return out;
+}
+
 std::wstring OAuth::BuildAuthorizeUrl() const {
     // 标准授权码流程授权地址
     // scope 必须取自 LittleSkin 文档中的权限节点：
@@ -16,7 +34,7 @@ std::wstring OAuth::BuildAuthorizeUrl() const {
     // 旧值 "minecraft" 会导致 invalid_scope 错误，使登录失败。
     return L"https://littleskin.cn/oauth/authorize"
            L"?client_id=" + clientId_
-           + L"&redirect_uri=" + redirectUri_
+           + L"&redirect_uri=" + UrlEncode(redirectUri_)
            + L"&response_type=code"
            + L"&scope=User.Read+Yggdrasil.PlayerProfiles.Read+Yggdrasil.MinecraftToken.Create";
 }

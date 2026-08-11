@@ -10,6 +10,12 @@
 
 using namespace Microsoft::WRL;
 
+// 内嵌页面的虚拟域名。页面以 https://app.stardust.local/index.html 加载，
+// origin 稳定，localStorage / chrome.webview.postMessage 均可用。
+// （旧实现用 NavigateToString，其 opaque origin 会让 localStorage 抛异常，
+//   导致整个 <script> 中断 —— 登录、窗口按钮、内存显示全部失效的根因。）
+const wchar_t* WebView2Host::kAppHost = L"https://app.stardust.local/index.html";
+
 WebView2Host::WebView2Host() {}
 WebView2Host::~WebView2Host() {}
 
@@ -168,6 +174,56 @@ HRESULT WebView2Host::Init(HWND hwnd,
                             RECT r; GetClientRect(hwnd_, &r);
                             ctrl->put_Bounds(r);
 
+                            // ===== 虚拟域名拦截：https://app.stardust.local/* 统一返回内嵌 HTML =====
+                            // 页面因此拥有稳定 origin（localStorage 可用），且不依赖磁盘文件。
+                            webview_->AddWebResourceRequestedFilter(
+                                L"https://app.stardust.local/*",
+                                COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+                            webview_->add_WebResourceRequested(
+                                Callback<ICoreWebView2WebResourceRequestedEventHandler>(
+                                    [this](IUnknown*, ICoreWebView2WebResourceRequestedEventArgs* args) -> HRESULT {
+                                        if (html_.empty()) return S_OK;
+                                        // 把 HTML 按 UTF-8 转出；若带启动错误则先注入脚本再返回
+                                        std::string page = util::WStringToString(html_);
+                                        if (!bootError_.empty()) {
+                                            std::wstring esc;
+                                            esc.reserve(bootError_.size() + 16);
+                                            for (wchar_t c : bootError_) {
+                                                if (c == L'\\' || c == L'"') { esc.push_back(L'\\'); esc.push_back(c); }
+                                                else if (c == L'\n') esc += L"\\n";
+                                                else if (c == L'\r') esc += L"\\r";
+                                                else if (c == L'<') esc += L"\\u003c";  // 防 </script> 提前闭合
+                                                else esc.push_back(c);
+                                            }
+                                            std::string script = "<script>window.__bootError=\"" +
+                                                                  util::WStringToString(esc) + "\";</script>";
+                                            size_t pos = page.find("<body");
+                                            if (pos != std::string::npos) {
+                                                size_t end = page.find(">", pos);
+                                                if (end != std::string::npos) page.insert(end + 1, script);
+                                                else page = script + page;
+                                            } else {
+                                                page = script + page;
+                                            }
+                                            bootError_.clear();
+                                        }
+                                        // 构造 text/html 响应
+                                        IStream* stream = SHCreateMemStream(
+                                            (const BYTE*)page.data(), (UINT)page.size());
+                                        if (!stream) return E_FAIL;
+                                        ComPtr<ICoreWebView2Environment> env;
+                                        webview_->get_Environment(&env);
+                                        if (!env) { stream->Release(); return E_FAIL; }
+                                        ComPtr<ICoreWebView2WebResourceResponse> response;
+                                        HRESULT hr = env->CreateWebResourceResponse(
+                                            stream, 200, L"OK",
+                                            L"Content-Type: text/html; charset=utf-8",
+                                            &response);
+                                        stream->Release();
+                                        if (FAILED(hr)) return hr;
+                                        return args->put_Response(response.Get());
+                                    }).Get(), nullptr);
+
                             // 注册 WebMessage 接收
                             webview_->add_WebMessageReceived(
                                 Callback<ICoreWebView2WebMessageReceivedEventHandler>(
@@ -209,8 +265,8 @@ HRESULT WebView2Host::Init(HWND hwnd,
                                         return S_OK;
                                     }).Get(), nullptr);
 
-                            // 导航到内嵌 HTML（NavigateToString 直接在内存渲染，不依赖外部文件）
-                            webview_->NavigateToString(html_.c_str());
+                            // 导航到虚拟域名（页面由上面的拦截器返回内嵌 HTML）
+                            webview_->Navigate(kAppHost);
 
                             ready_ = true;
                             if (onReady_) onReady_();
@@ -246,33 +302,11 @@ void WebView2Host::Navigate(const std::wstring& urlOrFile) {
     }
 }
 
-// OAuth 登录回调后回到启动器首页：重新用内嵌 HTML 渲染
+// OAuth 登录回调后回到启动器首页：记录待注入错误，重新导航到虚拟域名
+// （bootError 由 WebResourceRequested 拦截器注入页面顶部，交给 JS 原生 toast 显示）
 void WebView2Host::Reload(const std::wstring& bootError) {
-    if (webview_ && !html_.empty()) {
-        std::wstring h = html_;
-        if (!bootError.empty()) {
-            // 把错误原因安全注入页面顶部脚本，交给 JS 用原生 toast 显示
-            std::wstring esc;
-            esc.reserve(bootError.size() + 16);
-            for (wchar_t c : bootError) {
-                if (c == L'\\' || c == L'"') { esc.push_back(L'\\'); esc.push_back(c); }
-                else if (c == L'\n') esc += L"\\n";
-                else if (c == L'\r') esc += L"\\r";
-                else if (c == L'<') esc += L"\\u003c";   // 防止 </script> 提前闭合
-                else esc.push_back(c);
-            }
-            std::wstring script = L"<script>window.__bootError=\"" + esc + L"\";</script>";
-            size_t pos = h.find(L"<body");
-            if (pos != std::wstring::npos) {
-                size_t end = h.find(L">", pos);
-                if (end != std::wstring::npos) h.insert(end + 1, script);
-                else h = script + h;
-            } else {
-                h = script + h;
-            }
-        }
-        webview_->NavigateToString(h.c_str());
-    }
+    bootError_ = bootError;
+    if (webview_) webview_->Navigate(kAppHost);
 }
 
 void WebView2Host::Resize() {

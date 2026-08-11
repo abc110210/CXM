@@ -17,6 +17,15 @@ void JavaScanner::AddIfValid(std::vector<JavaInfo>& out, const std::wstring& jav
     out.push_back(info);
 }
 
+// 取 java.exe 所在目录名作为显示名兜底（如 zulu21.48.17-ca-jdk21.0.10-win_x64），
+// 比裸的 "java.exe" 有用得多
+static std::wstring FallbackName(const std::wstring& javaExe) {
+    std::wstring dir = javaExe.substr(0, javaExe.rfind(L'\\'));
+    size_t p = dir.find_last_of(L'\\');
+    std::wstring name = (p == std::wstring::npos) ? dir : dir.substr(p + 1);
+    return name.empty() ? L"java.exe" : (L"Java (" + name + L")");
+}
+
 std::wstring JavaScanner::QueryVersion(const std::wstring& javaExe) {
     // 后台运行 "java -version" 并读取输出（stderr 并入）。
     // 注意：不能用 _wpopen/system —— 那会为子进程新建一个控制台窗口，
@@ -25,7 +34,7 @@ std::wstring JavaScanner::QueryVersion(const std::wstring& javaExe) {
     HANDLE hRead = nullptr, hWrite = nullptr;
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
     if (!CreatePipe(&hRead, &hWrite, &sa, 0))
-        return javaExe.substr(javaExe.rfind(L"\\") + 1);
+        return FallbackName(javaExe);
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);  // 读端不继承
 
     STARTUPINFOW si = { sizeof(si) };
@@ -35,14 +44,17 @@ std::wstring JavaScanner::QueryVersion(const std::wstring& javaExe) {
     si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
     si.wShowWindow = SW_HIDE;
 
-    // 命令行写法：外层引号 + 内层带引号路径，保证含空格路径被正确解析
-    std::wstring cmdLine = L"\"\"" + javaExe + L"\" -version\"";
+    // 命令行：路径用一对引号包裹即可（CreateProcess 解析规则：首 token 引号内为应用名，
+    // 其余为参数）。旧写法在整条命令外加一层引号，Windows 命令行解析器对
+    // ""C:\path\java.exe" -version" 这种双重引号兼容性差，会导致 CreateProcess 失败
+    // 或参数解析错误，最终显示名退化成 "java.exe"。
+    std::wstring cmdLine = L"\"" + javaExe + L"\" -version";
     PROCESS_INFORMATION pi = { 0 };
     if (!CreateProcessW(nullptr, &cmdLine[0], nullptr, nullptr, TRUE,
                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         CloseHandle(hRead);
         CloseHandle(hWrite);
-        return javaExe.substr(javaExe.rfind(L"\\") + 1);
+        return FallbackName(javaExe);
     }
     CloseHandle(hWrite);  // 父进程关闭写端，否则 ReadFile 读不到 EOF 会一直阻塞
 
@@ -71,7 +83,7 @@ std::wstring JavaScanner::QueryVersion(const std::wstring& javaExe) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
-    if (line.empty()) return javaExe.substr(javaExe.rfind(L"\\") + 1);
+    if (line.empty()) return FallbackName(javaExe);
     // 取第一行，形如 "java version "1.8.0_401"" 或 "openjdk version "21.0.3""
     size_t nl = line.find(L'\n');
     std::wstring first = (nl == std::wstring::npos) ? line : line.substr(0, nl);
