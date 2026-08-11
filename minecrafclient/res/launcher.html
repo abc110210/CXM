@@ -48,9 +48,9 @@
     padding:0 14px;gap:10px;app-region:drag;-webkit-app-region:drag;
     background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,0));
     border-bottom:1px solid var(--stroke);z-index:20}
-  .logo{width:22px;height:22px;border-radius:7px;background:var(--accent);
+  .logo{width:22px;height:22px;border-radius:7px;background:var(--logo,var(--accent));
+    background-size:cover;background-position:center;
     box-shadow:0 0 14px rgba(185,140,255,.8);position:relative;flex:0 0 auto}
-  .logo::after{content:"✦";position:absolute;inset:0;display:grid;place-items:center;font-size:13px;color:#fff}
   .title{font-weight:600;font-size:14px;letter-spacing:.5px}
   .title small{font-weight:400;color:var(--muted);font-size:11px;margin-left:6px}
   .winbar{margin-left:auto;display:flex;gap:8px;app-region:no-drag;-webkit-app-region:no-drag}
@@ -185,11 +185,6 @@
   .register-bar button:hover{background:var(--glass-strong)}
   .register-title{flex:1;font-size:14px;font-weight:600;color:var(--text);text-align:center;padding-right:46px}
   .register-frame{flex:1;border:none;width:100%;background:#fff}
-
-  .statusbar{height:26px;flex:0 0 26px;display:flex;align-items:center;gap:14px;
-    padding:0 16px;font-size:11px;color:var(--muted);
-    background:rgba(255,255,255,.05);border-top:1px solid var(--stroke);z-index:20}
-  .statusbar .ok{color:#9affc4}
 
   .action-row{display:flex;gap:10px;margin-top:18px}
   .action-row .btn{flex:1}
@@ -380,22 +375,20 @@
       </main>
     </div>
 
-    <!-- 状态栏 -->
-    <div class="statusbar">
-      <span class="ok" id="st-dot">● 就绪</span>
-      <span id="st-user">未登录</span>
-      <span style="margin-left:auto">寄寄之家启动器</span>
-    </div>
   </div>
 
 <script>
   /* ===================== 状态 ===================== */
   const LS={ logged:'ls_logged', total:'ls_playtotal', name:'ls_name', role:'ls_role', mem:'ls_mem' };
+  const CLOUD_ENABLED = false; // 用户要求：云端同步暂不启用，只本地记录游玩时长
   let logged = localStorage.getItem(LS.logged)==='1';
   let totalMs = parseInt(localStorage.getItem(LS.total)||'0',10);
   let playing=false, startTs=0, timerId=null;
   let currentRole = localStorage.getItem(LS.role)||'默认角色';
   let currentMem = parseInt(localStorage.getItem(LS.mem)||'8192',10);
+
+  /* 状态栏已移除，保留安全设值函数，防止旧代码报错 */
+  function setText(id, text){ const el=document.getElementById(id); if(el) el.textContent=text; }
 
   /* ===================== 接收 C++ 消息 ===================== */
   if(window.chrome&&chrome.webview){
@@ -403,7 +396,7 @@
       const msg=typeof e.data==='string'?JSON.parse(e.data):e.data;
       if(msg.type==='game:started'){
         playing=true; startTs=Date.now();
-        document.getElementById('st-dot').textContent='● 游戏中';
+        setText('st-dot','● 游戏中');
         document.getElementById('stat-session').textContent='游戏中';
         document.getElementById('stat-session-wrap').classList.add('active');
         setLaunchBtn(true);
@@ -457,7 +450,23 @@
     if(v==='register') loadRegister();
     if(v==='settings') renderSettings();
   }
-  document.querySelectorAll('.nav').forEach(n=>{ n.onclick=()=>showView(n.dataset.view); });
+  // 侧边栏导航：事件委托，比逐个绑定 onclick 更可靠，同时支持 Enter/Space
+  (function initNav(){
+    const sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+    sidebar.addEventListener('click', function(e){
+      const nav = e.target.closest('.nav');
+      if (!nav || !nav.dataset.view) return;
+      showView(nav.dataset.view);
+    });
+    sidebar.addEventListener('keydown', function(e){
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const nav = e.target.closest('.nav');
+      if (!nav || !nav.dataset.view) return;
+      e.preventDefault();
+      showView(nav.dataset.view);
+    });
+  })();
 
   function renderHome(){
     document.getElementById('home-login').style.display = logged?'none':'block';
@@ -485,17 +494,17 @@
   }
   function loginSuccess(name){
     logged=true; localStorage.setItem(LS.logged,'1'); localStorage.setItem(LS.name,name);
-    document.getElementById('st-user').textContent=name;
+    setText('st-user',name);
     currentRole=name; localStorage.setItem(LS.role,currentRole);
-    // 登录成功后让 C++ 去服务端拉取累计游玩时长
-    if(window.chrome&&chrome.webview){
+    // 登录成功后让 C++ 去服务端拉取累计游玩时长（云端关闭时跳过）
+    if(CLOUD_ENABLED && window.chrome&&chrome.webview){
       chrome.webview.postMessage(JSON.stringify({type:'cloud:playtime:get',player_id:name}));
     }
     renderHome(); showView('home');
   }
   function logout(){
     logged=false; localStorage.removeItem(LS.logged); localStorage.removeItem(LS.name); localStorage.removeItem(LS.role);
-    document.getElementById('st-user').textContent='未登录';
+    setText('st-user','未登录');
     renderHome(); showView('home');
   }
 
@@ -593,7 +602,7 @@
   }
   function onGameStarted(){
     playing=true; startTs=Date.now();
-    document.getElementById('st-dot').textContent='● 游戏中';
+    setText('st-dot','● 游戏中');
     document.getElementById('stat-session').textContent='游戏中';
     document.getElementById('stat-session-wrap').classList.add('active');
     setLaunchBtn(true);
@@ -605,13 +614,13 @@
     playing=false; clearInterval(timerId); stopCloudUploadTimer();
     const sessionMs=Date.now()-startTs;
     totalMs += sessionMs; localStorage.setItem(LS.total,String(totalMs));
-    document.getElementById('st-dot').textContent='● 就绪';
+    setText('st-dot','● 就绪');
     document.getElementById('stat-session').textContent='未启动';
     document.getElementById('stat-session-wrap').classList.remove('active');
     document.getElementById('stat-total').textContent=fmt(totalMs);
     setLaunchBtn(false);
-    // 通知 C++ 把本次时长同步到服务端
-    if(window.chrome&&chrome.webview){
+    // 通知 C++ 把本次时长同步到服务端（云端关闭时跳过）
+    if(CLOUD_ENABLED && window.chrome&&chrome.webview){
       chrome.webview.postMessage(JSON.stringify({
         type:'cloud:playtime:upload',
         player_id: localStorage.getItem(LS.name) || currentRole,
@@ -647,7 +656,7 @@
       const currentTotalMs = totalMs + sessionMs;
       const deltaSeconds = Math.floor((currentTotalMs - lastUploadedMs)/1000);
       if(deltaSeconds < 60) return; // 少于1分钟不上传，减少请求
-      if(window.chrome&&chrome.webview){
+      if(CLOUD_ENABLED && window.chrome&&chrome.webview){
         chrome.webview.postMessage(JSON.stringify({
           type:'cloud:playtime:upload',
           player_id: localStorage.getItem(LS.name) || currentRole,
@@ -677,7 +686,7 @@
       p.style.animationDelay=(-Math.random()*10)+'s'; p.style.transform='scale('+(0.6+Math.random()*0.8)+')';
       box.appendChild(p); }
     if(logged){
-      document.getElementById('st-user').textContent=localStorage.getItem(LS.name)||'Steve_Chan';
+      setText('st-user', localStorage.getItem(LS.name)||'Steve_Chan');
       updateRoleMenu();
     }
     renderHome();

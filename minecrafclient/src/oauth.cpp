@@ -11,11 +11,14 @@ OAuth::OAuth(const Config& cfg)
 
 std::wstring OAuth::BuildAuthorizeUrl() const {
     // 标准授权码流程授权地址
+    // scope 必须取自 LittleSkin 文档中的权限节点：
+    //   User.Read + Yggdrasil.PlayerProfiles.Read + Yggdrasil.MinecraftToken.Create
+    // 旧值 "minecraft" 会导致 invalid_scope 错误，使登录失败。
     return L"https://littleskin.cn/oauth/authorize"
            L"?client_id=" + clientId_
            + L"&redirect_uri=" + redirectUri_
            + L"&response_type=code"
-           + L"&scope=minecraft";
+           + L"&scope=User.Read+Yggdrasil.PlayerProfiles.Read+Yggdrasil.MinecraftToken.Create";
 }
 
 // 内部：POST 表单到 https://littleskin.cn/oauth/token

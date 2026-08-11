@@ -12,6 +12,9 @@
 #include <chrono>
 #include <sstream>
 
+// 用户要求：云端同步暂不启用，仅本地记录游玩时长
+constexpr bool CLOUD_SYNC_ENABLED = false;
+
 // 兼容旧版 Windows SDK：DWM 圆角属性
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
@@ -53,6 +56,18 @@ static std::wstring JsonEscape(const std::wstring& s) {
         out += c;
     }
     return out;
+}
+
+// 从 URI 的 Query String 取某个参数（不做完整 URL decode，仅用于错误展示）
+static std::wstring GetQueryParam(const std::wstring& uri, const std::wstring& key) {
+    std::wstring prefix1 = L"?" + key + L"=";
+    std::wstring prefix2 = L"&" + key + L"=";
+    size_t pos = uri.find(prefix1);
+    if (pos == std::wstring::npos) pos = uri.find(prefix2);
+    if (pos == std::wstring::npos) return {};
+    pos += (uri[pos] == L'?' ? prefix1.size() : prefix2.size());
+    size_t end = uri.find(L'&', pos);
+    return (end == std::wstring::npos) ? uri.substr(pos) : uri.substr(pos, end - pos);
 }
 
 // ---------------- 初始化 ----------------
@@ -243,6 +258,17 @@ void App::OnNavigate(const std::wstring& uri) {
 }
 
 void App::ParseCallback(const std::wstring& uri) {
+    // 先处理授权失败：LittleSkin 会在回调 URL 中带回 error / error_description
+    std::wstring err = GetQueryParam(uri, L"error");
+    if (!err.empty()) {
+        std::wstring desc = GetQueryParam(uri, L"error_description");
+        std::wstring reason = desc.empty() ? (L"OAuth 错误: " + err) : desc;
+        SendToJs(L"{\"type\":\"oauth:fail\",\"reason\":\"" + JsonEscape(reason) + L"\"}");
+        // 回到启动器首页，避免停留在空白/错误页
+        webview_.Reload();
+        return;
+    }
+
     // uri 形如 stardust://oauth/callback?code=xxxx
     size_t q = uri.find(L"?code=");
     if (q == std::wstring::npos) return;
@@ -315,8 +341,8 @@ void App::OnGameExit() {
     long long sessionMs = now - gameStartMs_;
     long long sessionSec = sessionMs / 1000;
 
-    // 上传云端
-    if (cloud_ && loggedIn_) {
+    // 上传云端（按用户要求暂不启用，仅本地记录时长）
+    if (CLOUD_SYNC_ENABLED && cloud_ && loggedIn_) {
         long long clientTotal = sessionSec; // 本地累计可在此基础上累加，这里简化传输本次
         cloud_->UploadPlaytime(currentPlayer_, sessionSec, clientTotal);
     }

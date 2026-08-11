@@ -56,6 +56,23 @@ std::vector<uint8_t> WebView2Host::LoadBackgroundPng() {
     return png;
 }
 
+// base64 编码辅助函数
+static std::string Base64Encode(const std::vector<uint8_t>& data) {
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string b64;
+    b64.reserve(((data.size() + 2) / 3) * 4);
+    for (size_t i = 0; i < data.size(); i += 3) {
+        uint32_t n = (uint32_t)data[i] << 16;
+        if (i + 1 < data.size()) n |= (uint32_t)data[i + 1] << 8;
+        if (i + 2 < data.size()) n |= (uint32_t)data[i + 2];
+        b64.push_back(tbl[(n >> 18) & 0x3F]);
+        b64.push_back(tbl[(n >> 12) & 0x3F]);
+        b64.push_back(i + 1 < data.size() ? tbl[(n >> 6) & 0x3F] : '=');
+        b64.push_back(i + 2 < data.size() ? tbl[n & 0x3F] : '=');
+    }
+    return b64;
+}
+
 // ========== 注入背景图 ==========
 // 把 PNG → base64 → setProperty('--bg', 'url(data:image/png;base64,...)')。
 // 在每次 NavigationCompleted 后调用一次（首次加载 + OAuth Reload）。
@@ -65,22 +82,39 @@ void WebView2Host::InjectBackground() {
     if (cached.empty()) cached = LoadBackgroundPng();
     if (cached.empty()) return;
 
-    // base64 编码
-    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string b64;
-    b64.reserve(((cached.size() + 2) / 3) * 4);
-    for (size_t i = 0; i < cached.size(); i += 3) {
-        uint32_t n = (uint32_t)cached[i] << 16;
-        if (i + 1 < cached.size()) n |= (uint32_t)cached[i + 1] << 8;
-        if (i + 2 < cached.size()) n |= (uint32_t)cached[i + 2];
-        b64.push_back(tbl[(n >> 18) & 0x3F]);
-        b64.push_back(tbl[(n >> 12) & 0x3F]);
-        b64.push_back(i + 1 < cached.size() ? tbl[(n >> 6) & 0x3F] : '=');
-        b64.push_back(i + 2 < cached.size() ? tbl[n & 0x3F] : '=');
-    }
-
     std::wstring js = L"document.documentElement.style.setProperty('--bg','url(\"data:image/png;base64," +
-                      util::StringToWString(b64) + L"\")')";
+                      util::StringToWString(Base64Encode(cached)) + L"\")')";
+    webview_->ExecuteScript(js.c_str(), nullptr);
+}
+
+// 从 exe 资源读取左上角头像 logo PNG（RCDATA -> IDR_LOGO_PNG）
+std::vector<uint8_t> WebView2Host::LoadLogoPng() {
+    std::vector<uint8_t> png;
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    HRSRC hRes = FindResourceW(hInst, MAKEINTRESOURCEW(IDR_LOGO_PNG), RT_RCDATA);
+    if (!hRes) {
+        util::Log("LoadLogoPng: FindResourceW(IDR_LOGO_PNG, RT_RCDATA) 失败");
+        return png;
+    }
+    HGLOBAL hGlob = LoadResource(hInst, hRes);
+    if (!hGlob) return png;
+    DWORD size = SizeofResource(hInst, hRes);
+    const uint8_t* data = (const uint8_t*)LockResource(hGlob);
+    if (!data || size == 0) return png;
+    png.assign(data, data + size);
+    return png;
+}
+
+// 把 logo → base64 → setProperty('--logo', 'url(data:image/png;base64,...)')
+// 在每次 NavigationCompleted 后调用一次，确保 .logo 始终显示真实头像。
+void WebView2Host::InjectLogo() {
+    if (!webview_) return;
+    static std::vector<uint8_t> cached;
+    if (cached.empty()) cached = LoadLogoPng();
+    if (cached.empty()) return;
+
+    std::wstring js = L"document.documentElement.style.setProperty('--logo','url(\"data:image/png;base64," +
+                      util::StringToWString(Base64Encode(cached)) + L"\")')";
     webview_->ExecuteScript(js.c_str(), nullptr);
 }
 
@@ -165,12 +199,13 @@ HRESULT WebView2Host::Init(HWND hwnd,
                                         return S_OK;
                                     }).Get(), nullptr);
 
-                            // 注册导航完成：用于登录后回到首页时切到已登录态 + 注入背景图
+                            // 注册导航完成：用于登录后回到首页时切到已登录态 + 注入背景图/logo
                             webview_->add_NavigationCompleted(
                                 Callback<ICoreWebView2NavigationCompletedEventHandler>(
                                     [this](IUnknown*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
                                         if (onNavigated_) onNavigated_();
                                         InjectBackground();   // 幂等：每次导航后都注入一次
+                                        InjectLogo();         // 确保左上角 logo 始终显示
                                         return S_OK;
                                     }).Get(), nullptr);
 

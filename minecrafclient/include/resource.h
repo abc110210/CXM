@@ -10,3 +10,4 @@
 // 注：WebView2 loader 采用静态链接（WebView2LoaderStatic.lib），无 WebView2Loader.dll。
 #define IDR_APP_HTML      200
 #define IDR_BG_PNG        201   // 背景图 PNG（RCDATA），运行时 base64 注入
+#define IDR_LOGO_PNG      202   // 左上角头像 logo（RCDATA），运行时 base64 注入

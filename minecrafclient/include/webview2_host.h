@@ -46,6 +46,10 @@ private:
     static std::vector<uint8_t> LoadBackgroundPng();
     // 把背景图 base64 通过 setProperty('--bg') 注入页面（幂等，可多次调用）
     void InjectBackground();
+    // 从 exe 资源读取左上角头像 logo PNG（RCDATA -> IDR_LOGO_PNG）
+    static std::vector<uint8_t> LoadLogoPng();
+    // 把 logo base64 通过 setProperty('--logo') 注入页面（幂等，可多次调用）
+    void InjectLogo();
 
     Microsoft::WRL::ComPtr<ICoreWebView2> webview_;
     Microsoft::WRL::ComPtr<ICoreWebView2Controller> controller_;

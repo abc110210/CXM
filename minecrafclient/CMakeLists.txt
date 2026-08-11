@@ -67,6 +67,7 @@ endfunction()
 escape_rc_path("${EMBEDDED_HTML}" EMBEDDED_HTML_RC)
 escape_rc_path("${CMAKE_CURRENT_SOURCE_DIR}/res/background.png" EMBEDDED_PNG_RC)
 escape_rc_path("${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico" EMBEDDED_ICO_RC)
+escape_rc_path("${CMAKE_CURRENT_SOURCE_DIR}/res/logo.png" EMBEDDED_LOGO_RC)
 configure_file(res/html_rc.in "${CMAKE_CURRENT_BINARY_DIR}/html_rc.rc" @ONLY)
 
 # ---------- 收集源文件 ----------

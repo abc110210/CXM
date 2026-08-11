@@ -8,6 +8,9 @@ Config::Config() {
     path_ = util::GetExeDir() + L"\\config.ini";
     // 默认值
     clientId = L"1493";
+    // LittleSkin OAuth2 应用 client_secret（机密客户端，与 exe 一起分发）
+    // 生产环境可考虑用 DPAPI/Windows Credential 加密存储
+    clientSecret = L"GYiMcGoAnCA1mKYmc4fRMQDnO9wxqFK1NydyXLAK";
     redirectUri = L"stardust://oauth/callback";
     serverUrl = L"https://你的域名.com";   // 改成你的备案域名
     serverSecret = L"请改成服务端 config.json 里的 secret_key";
@@ -29,6 +32,8 @@ void Config::Load() {
 
     clientId     = getStr(L"launcher", L"client_id", clientId);
     clientSecret = getStr(L"launcher", L"client_secret", clientSecret);
+    // 若用户在 ini 里把 client_secret 留空，仍使用内置默认值兜底，避免登录失败
+    if (clientSecret.empty()) clientSecret = L"GYiMcGoAnCA1mKYmc4fRMQDnO9wxqFK1NydyXLAK";
     redirectUri  = getStr(L"launcher", L"redirect_uri", redirectUri);
     selectedJava = getStr(L"launcher", L"selected_java", selectedJava);
     selectedCore = getStr(L"launcher", L"selected_core", selectedCore);
