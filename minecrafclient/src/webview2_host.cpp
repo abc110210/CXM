@@ -140,8 +140,17 @@ HRESULT WebView2Host::Init(HWND hwnd,
     // 程序目录保持干净（与 client 项目同策略）
     std::wstring userData = util::GetWebView2DataDir();
 
+    // GPU 渲染稳定性：防止大量 backdrop-filter + CSS 动画长时间运行后黑屏。
+    // 通过 AdditionalBrowserArguments 传入 Chromium 开关：
+    //   --disable-acrylic-effects  ：去掉 Windows 系统级亚克力效果（减少 GPU 合成层）
+    //   其余靠 HTML 侧减少动画 + 限制花瓣运行时长来治本。
+    ComPtr<ICoreWebView2EnvironmentOptions> options =
+        Make<CoreWebView2EnvironmentOptions>();
+    options->put_AdditionalBrowserArguments(
+        L"--disable-acrylic-effects");
+
     return CreateCoreWebView2EnvironmentWithOptions(
-        nullptr, userData.c_str(), nullptr,
+        nullptr, userData.c_str(), options.Get(),
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [this](HRESULT, ICoreWebView2Environment* env) -> HRESULT {
                 if (!env) return E_FAIL;
