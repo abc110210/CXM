@@ -44,9 +44,6 @@ private:
     static std::wstring LoadAppHtml();
     // 从 exe 资源读取背景图 PNG（RCDATA -> IDR_BG_PNG），失败返回空 vector
     static std::vector<uint8_t> LoadBackgroundPng();
-    // 确保 WebView2Loader.dll 已被 LoadLibrary（不在 exe 旁时从资源释放到 %TEMP%，
-    // 文件名与 /DELAYLOAD 完全一致，延迟加载器能命中已加载模块表）
-    static std::wstring EnsureWebView2LoaderDll();
     // 把背景图 base64 通过 setProperty('--bg') 注入页面（幂等，可多次调用）
     void InjectBackground();
 

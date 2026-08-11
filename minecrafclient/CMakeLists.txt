@@ -11,21 +11,19 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ---------- 定位 WebView2 SDK ----------
 # WEBVIEW2_SDK_DIR 应指向 NuGet 包解压后包含 "include/WebView2.h" 与
-# "x64/WebView2Loader*.lib" 的那一层（即包内的 build/native）。CI 会自动探测并传入，
+# "x64/WebView2LoaderStatic.lib" 的那一层（即包内的 build/native）。CI 会自动探测并传入，
 # 本地手动构建时用 -DWEBVIEW2_SDK_DIR=.../build/native 指定。
-# 注意：新版 WebView2 SDK（>=1.0.2xxx）把导入库改名为 WebView2Loader.dll.lib，
-# 旧版叫 WebView2Loader.lib；故导入库路径由 CI 通过 WEBVIEW2_LOADER_LIB 显式传入，
-# 缺省才回退到旧命名，避免写死文件名导致 LNK1181。
+# 注意：与 client 项目同款做法 —— 链接 WebView2LoaderStatic.lib（静态库），
+# loader 代码直接编进 exe，运行时不需要 WebView2Loader.dll，程序目录零 dll。
 if(NOT WEBVIEW2_SDK_DIR)
   set(WEBVIEW2_SDK_DIR "${CMAKE_SOURCE_DIR}/../WebView2SDK" CACHE PATH "WebView2 SDK (build/native) 目录")
 endif()
 if(NOT WEBVIEW2_LOADER_LIB)
-  set(WEBVIEW2_LOADER_LIB "${WEBVIEW2_SDK_DIR}/x64/WebView2Loader.lib" CACHE FILEPATH "WebView2Loader 导入库路径")
+  set(WEBVIEW2_LOADER_LIB "${WEBVIEW2_SDK_DIR}/x64/WebView2LoaderStatic.lib" CACHE FILEPATH "WebView2Loader 静态库路径")
 endif()
 
 set(WV_INCLUDE "${WEBVIEW2_SDK_DIR}/include")
 set(WV_LIB "${WEBVIEW2_LOADER_LIB}")
-set(WV_DLL "${WEBVIEW2_SDK_DIR}/x64/WebView2Loader.dll")
 
 if(NOT EXISTS "${WV_INCLUDE}/WebView2.h")
   message(FATAL_ERROR
@@ -33,18 +31,11 @@ if(NOT EXISTS "${WV_INCLUDE}/WebView2.h")
     "指向 NuGet 包解压后含 build/native 的目录。")
 endif()
 
-# 导入库存在性检查（文件名随 SDK 版本变化，必须由 CI 正确传入 WEBVIEW2_LOADER_LIB）
+# 静态库存在性检查（loader 直接编进 exe，无需运行时 dll）
 if(NOT EXISTS "${WV_LIB}")
   message(FATAL_ERROR
-    "未找到 WebView2Loader 导入库（${WV_LIB}）。新版 SDK 命名为 WebView2Loader.dll.lib，"
-    "旧版为 WebView2Loader.lib；请在 CI 中通过 -DWEBVIEW2_LOADER_LIB 传入真实路径。")
-endif()
-
-# 运行时 DLL 存在性检查（要嵌入 exe 资源段，RC 编译期必须能读到）
-if(NOT EXISTS "${WV_DLL}")
-  message(FATAL_ERROR
-    "未找到 WebView2Loader 运行时 DLL（${WV_DLL}）。该文件会被嵌入 exe 资源段，"
-    "编译期必须存在；请确认 NuGet 包 x64 目录下有 WebView2Loader.dll。")
+    "未找到 WebView2Loader 静态库（${WV_LIB}）。请确认 NuGet 包 x64 目录下有 "
+    "WebView2LoaderStatic.lib（CI 中通过 -DWEBVIEW2_LOADER_LIB 传入真实路径）。")
 endif()
 
 # ---------- 生成内嵌版 HTML（背景图改为占位符）----------
@@ -75,7 +66,6 @@ endfunction()
 
 escape_rc_path("${EMBEDDED_HTML}" EMBEDDED_HTML_RC)
 escape_rc_path("${CMAKE_CURRENT_SOURCE_DIR}/res/background.png" EMBEDDED_PNG_RC)
-escape_rc_path("${WV_DLL}" EMBEDDED_DLL_RC)
 escape_rc_path("${CMAKE_CURRENT_SOURCE_DIR}/res/app.ico" EMBEDDED_ICO_RC)
 configure_file(res/html_rc.in "${CMAKE_CURRENT_BINARY_DIR}/html_rc.rc" @ONLY)
 
@@ -97,26 +87,16 @@ target_include_directories(StardustLauncher PRIVATE
 )
 
 target_link_libraries(StardustLauncher PRIVATE
-    ${WV_LIB}
+    ${WV_LIB}    # WebView2LoaderStatic.lib：loader 静态链接进 exe，无运行时 dll
     shlwapi
     winhttp
     bcrypt
     version
     dwmapi
-    delayimp   # MSVC 延迟加载辅助库（/DELAYLOAD:WebView2Loader.dll 需要）
 )
 
-# 关键：延迟加载 WebView2Loader.dll
-#   - 默认链接下，Windows loader 在 exe 启动时就自动 LoadLibrary("WebView2Loader.dll")，
-#     程序目录没 dll 就弹"找不到 dll"错误，且在我们 EnsureWebView2LoaderDll() 之前。
-#   - /DELAYLOAD 后 dll 只在第一次调用 WebView2 API 时才加载，给我们时间先释放 dll 到 %TEMP%。
-#   - 释放出的 dll 文件名保持 WebView2Loader.dll（与 /DELAYLOAD 一致），
-#     EnsureWebView2LoaderDll 已先 LoadLibrary 成功，延迟加载器按文件名命中已加载模块表。
-target_link_options(StardustLauncher PRIVATE /DELAYLOAD:WebView2Loader.dll)
-
 # ---------- 资源已全部内嵌进 exe，程序目录无需任何外部文件 ----------
-# 网页（RT_HTML）+ 背景图（RCDATA）+ WebView2Loader.dll（RCDATA）全部在 exe 内，
-# 运行时 WebView2Loader.dll 释放到 %TEMP%，WebView2 缓存也放 %TEMP%。
+# 网页（RT_HTML）+ 背景图（RCDATA）在 exe 内；WebView2 loader 是静态链接（无 dll）。
 # exe 顶层只剩：StardustLauncher.exe + config.ini。
 
 # 设置输出目录，方便打包

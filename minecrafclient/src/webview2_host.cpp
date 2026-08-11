@@ -56,68 +56,6 @@ std::vector<uint8_t> WebView2Host::LoadBackgroundPng() {
     return png;
 }
 
-// ========== 运行时释放 WebView2Loader.dll ==========
-// 程序目录如果已经有 dll（开发期），直接复用；否则从 exe 资源释放到 %TEMP%。
-// 重要：释放出的文件名必须与 /DELAYLOAD:WebView2Loader.dll 完全一致（WebView2Loader.dll），
-// 这样延迟加载器 LoadLibrary("WebView2Loader.dll") 时能命中已加载模块表，无需搜索路径。
-std::wstring WebView2Host::EnsureWebView2LoaderDll() {
-    // 1) 优先复用程序目录的 dll（开发/调试期更顺手）
-    std::wstring exeDir = util::GetExeDir();
-    std::wstring exeSide = exeDir + L"\\WebView2Loader.dll";
-    if (GetFileAttributesW(exeSide.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        LoadLibraryW(exeSide.c_str());  // 立即加载，让延迟加载器后续命中
-        return exeSide;
-    }
-    // 2) 否则从资源释放到 %TEMP%\WebView2Loader.dll
-    HINSTANCE hInst = GetModuleHandleW(nullptr);
-    HRSRC hRes = FindResourceW(hInst, MAKEINTRESOURCEW(IDR_WEBVIEW2_DLL), RT_RCDATA);
-    if (!hRes) {
-        util::Log("EnsureWebView2LoaderDll: 资源 IDR_WEBVIEW2_DLL 缺失");
-        return L"";
-    }
-    HGLOBAL hGlob = LoadResource(hInst, hRes);
-    if (!hGlob) return L"";
-    DWORD size = SizeofResource(hInst, hRes);
-    const uint8_t* data = (const uint8_t*)LockResource(hGlob);
-    if (!data || size == 0) return L"";
-
-    std::wstring outPath = util::GetTempDir() + L"\\WebView2Loader.dll";
-    // 已存在且大小一致则复用，避免每次启动都重写（dll 内容固定）
-    DWORD attrs = GetFileAttributesW(outPath.c_str());
-    if (attrs != INVALID_FILE_ATTRIBUTES) {
-        HANDLE hOld = CreateFileW(outPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hOld != INVALID_HANDLE_VALUE) {
-            DWORD oldSize = GetFileSize(hOld, nullptr);
-            CloseHandle(hOld);
-            if (oldSize == size) {
-                LoadLibraryW(outPath.c_str());
-                return outPath;
-            }
-        }
-    }
-
-    HANDLE h = CreateFileW(outPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        util::Log("EnsureWebView2LoaderDll: CreateFileW 失败: " + std::to_string(GetLastError()));
-        return L"";
-    }
-    DWORD written = 0;
-    BOOL ok = WriteFile(h, data, size, &written, nullptr);
-    CloseHandle(h);
-    if (!ok || written != size) {
-        util::Log("EnsureWebView2LoaderDll: WriteFile 失败: " + std::to_string(GetLastError()));
-        return L"";
-    }
-    // 立即加载，让延迟加载器后续 LoadLibrary("WebView2Loader.dll") 命中已加载模块
-    if (!LoadLibraryW(outPath.c_str())) {
-        util::Log("EnsureWebView2LoaderDll: LoadLibraryW 失败: " + std::to_string(GetLastError()));
-        return L"";
-    }
-    return outPath;
-}
-
 // ========== 注入背景图 ==========
 // 把 PNG → base64 → setProperty('--bg', 'url(data:image/png;base64,...)')。
 // 在每次 NavigationCompleted 后调用一次（首次加载 + OAuth Reload）。
@@ -156,12 +94,6 @@ HRESULT WebView2Host::Init(HWND hwnd,
     onNav_ = onNav;
     onReady_ = onReady;
     onNavigated_ = onNavigated;
-
-    // 先确保 WebView2Loader.dll 可被加载（不在程序目录时从 exe 资源释放到 %TEMP%）
-    if (EnsureWebView2LoaderDll().empty()) {
-        util::Log("Init: WebView2Loader.dll 加载失败，无法启动 WebView2");
-        return E_FAIL;
-    }
 
     // 从 exe 资源读取内嵌 HTML；为空说明资源没编进去，直接报错
     html_ = LoadAppHtml();

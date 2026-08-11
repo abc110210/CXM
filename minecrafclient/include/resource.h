@@ -7,6 +7,6 @@
 // 内嵌的 launcher.html（RT_HTML 预定义类型），运行时由 webview2_host 读取并
 // NavigateToString 渲染 —— 背景图不再 base64 注入 HTML，而是用 CSS 变量占位，
 // 运行时由 webview2_host 读取 IDR_BG_PNG → base64 → setProperty('--bg') 注入。
+// 注：WebView2 loader 采用静态链接（WebView2LoaderStatic.lib），无 WebView2Loader.dll。
 #define IDR_APP_HTML      200
 #define IDR_BG_PNG        201   // 背景图 PNG（RCDATA），运行时 base64 注入
-#define IDR_WEBVIEW2_DLL  202   // WebView2Loader.dll（RCDATA），运行时释放到 %TEMP% 后 LoadLibrary
