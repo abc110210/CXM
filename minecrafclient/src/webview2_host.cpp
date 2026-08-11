@@ -6,6 +6,7 @@
 #include <shlwapi.h>
 #include <string>
 #include <vector>
+#include <delayimp.h>   // delayload 钩子（运行期 dll 释放兜底）
 
 using namespace Microsoft::WRL;
 
@@ -273,3 +274,25 @@ void WebView2Host::Resize() {
         controller_->put_Bounds(r);
     }
 }
+
+// ========== 延迟加载失败钩子（兜底释放 dll） ==========
+// MSVC /DELAYLOAD:WebView2Loader.dll 让 WebView2Loader.dll 在第一次调用
+// WebView2 API 时才 LoadLibrary。若此时 EnsureWebView2LoaderDll 还没跑过
+// （极端时序），loader 会失败；钩子在此场景下从 RCDATA 释放 dll 到 %TEMP%
+// 并返回 HMODULE，让延迟加载器继续解析函数。
+extern "C" {
+FARPROC WINAPI WebView2DelayLoadFailureHook(unsigned int dliNotify, PDelayLoadInfo pdliInfo) {
+    if (dliNotify == dliFailLoadLib && pdliInfo && pdliInfo->szDll
+        && _stricmp(pdliInfo->szDll, "WebView2Loader.dll") == 0) {
+        std::wstring path = WebView2Host::EnsureWebView2LoaderDll();
+        if (!path.empty()) {
+            HMODULE h = LoadLibraryW(path.c_str());
+            if (h) return reinterpret_cast<FARPROC>(h);  // 把我们的 HMODULE 给延迟加载器
+        }
+    }
+    return NULL;  // 让默认错误处理弹窗（其他 dll 失败时仍正常报错）
+}
+
+// 注册到 MSVC 延迟加载器（链接器会调用这个符号）
+__declspec(selectany) PfnDliHook __pfnDliFailureHook2 = WebView2DelayLoadFailureHook;
+} // extern "C"
