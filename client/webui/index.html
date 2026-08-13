@@ -410,8 +410,8 @@
   $('retry').onclick    = ()=> send({type:'health'});
   $('detect').onclick   = ()=> send({type:'detect'});
   $('browse').onclick   = ()=> send({type:'pick'});
-  $('upload').onclick   = ()=> send({type:'upload', dir:state.dir, password:$('pwd').value});
-  $('download').onclick = ()=> send({type:'download', dir:state.dir, dlpassword:$('dlpwd').value});
+  $('upload').onclick   = ()=>{ if(state.busy) return; send({type:'upload', dir:state.dir, password:$('pwd').value}); };
+  $('download').onclick = ()=>{ if(state.busy) return; send({type:'download', dir:state.dir, dlpassword:$('dlpwd').value}); };
   $('copy').onclick     = ()=> send({type:'copy', text:$('result').value});
 
   // 显示 / 隐藏密码：改用 type=text + CSS -webkit-text-security 自遮罩，
