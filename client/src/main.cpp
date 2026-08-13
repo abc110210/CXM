@@ -514,6 +514,12 @@ void HandlePageMessage(const std::wstring& msg) {
                 L"", OBFW("57y65bCR5a+G56CB"), OBFW("57y65bCR5a+G56CB"), false));
             return;
         }
+        // 原生忙锁：正在上传/解压时直接忽略新点击，杜绝并发线程竞争导致的崩溃
+        if (g_busy.load()) {
+            PostLog(L"正在处理上一次操作，请稍候…");
+            return;
+        }
+        g_busy.store(true);
         std::thread(UploadThread, dir, pwd).detach();
     }
     else if (type == "download") {
@@ -537,6 +543,12 @@ void HandlePageMessage(const std::wstring& msg) {
                 OBFW("5Y+W5Zue5a+G56CB5qC85byP5LiN5q2j56Gu77yI5bqU5Li6IFNLLSDlvIDlpLTvvIzlhbEgMjMg5L2N77yJ"), L"", OBFW("57y65bCR5a+G56CB"), OBFW("57y65bCR5a+G56CB"), false));
             return;
         }
+        // 原生忙锁：正在上传/解压时直接忽略新点击，杜绝并发线程竞争导致的崩溃
+        if (g_busy.load()) {
+            PostLog(L"正在处理上一次操作，请稍候…");
+            return;
+        }
+        g_busy.store(true);
         std::thread(DownloadThread, dir, dlPwd).detach();
     }
     else if (type == "copy") {
@@ -654,6 +666,7 @@ void HandleOutcome(uploader::Outcome* r) {
                        resultText, resultLabel, stage, copyEnabled));
     delete r;
     PostJson(BuildBusy(false));
+    g_busy.store(false);
 }
 
 // ---------------------------------------------------------------------------

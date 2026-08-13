@@ -249,7 +249,8 @@ Outcome Run(const std::wstring& savesDir,
     }
 
     out.objectKey = util::Utf8ToWide(objectKey);
-    L(OBFW("5Yet6K+B6I635Y+W5oiQ5Yqf77yM55uu5qCH5a+56LGh77ya") + out.objectKey);
+    // 不打印对象 key（saves/.../xxx.zip），避免向用户暴露文件路径与对象储存命名规律
+    L(L"凭证获取成功，开始上传…");
 
     // 后端随上传凭证一并返回「取回密码」（SK- 开头，23 位）。
     // 同一上传密码 → 同一取回密码（pw_map 1:1 映射），不会每次上传都变。
@@ -257,7 +258,8 @@ Outcome Run(const std::wstring& savesDir,
 
     // ---------------- 5. 直传七牛 ----------------
     P(580, OBFW("5q2j5Zyo5LiK5Lyg"));
-    L(OBFW("5q2j5Zyo5LiK5Lyg5Yiw5a+56LGh5a2Y5YKo77ya") + util::Utf8ToWide(uploadHost));
+    // 不打印 upload_host（https://up-z2.qiniup.com），避免暴露对象储存所用域名/区域
+    L(L"正在上传到对象存储…");
 
     std::vector<std::pair<std::string, std::string>> fields;
     fields.emplace_back(OBFA("dG9rZW4="), uploadToken);
