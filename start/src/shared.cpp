@@ -20,7 +20,7 @@ bool EnsureDir(const std::wstring& dir) {
     if (GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES) return true;
     size_t pos = 0;
     std::wstring cur;
-    // skip drive prefix like C:\
+    // skip the drive prefix (for example the C: root)
     if (dir.size() >= 3 && dir[1] == L':') {
         cur = dir.substr(0, 3);
         pos = 3;
