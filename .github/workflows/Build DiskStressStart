@@ -1,0 +1,62 @@
+name: Build DiskStressStart
+
+on:
+  workflow_dispatch: 
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ x64, x86 ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Resolve machine flag (x64)
+        if: matrix.arch == 'x64'
+        shell: cmd
+        run: echo MACH=X64>> %GITHUB_ENV%
+
+      - name: Resolve machine flag (x86)
+        if: matrix.arch == 'x86'
+        shell: cmd
+        run: echo MACH=X86>> %GITHUB_ENV%
+
+      - name: Compile DiskStressStart.exe
+        shell: cmd
+        run: |
+          if not exist out mkdir out
+          cl /nologo /std:c++17 /utf-8 /EHsc /O2 /W3 /GS /Gy /D_UNICODE /DUNICODE /Fo:out\ /Fd:out\start.pdb start\src\shared.cpp start\src\report.cpp start\src\worker.cpp start\src\main.cpp /link /SUBSYSTEM:WINDOWS /MACHINE:%MACH% /OPT:REF /OPT:ICF /OUT:out\DiskStressStart.exe
+          if errorlevel 1 exit /b 1
+          copy /Y start\DiskStress.ini out\DiskStress.ini
+          copy /Y start\README.md out\README.md
+          dir out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiskStressStart-${{ matrix.arch }}
+          path: |
+            out/DiskStressStart.exe
+            out/DiskStress.ini
+            out/README.md
+
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/DiskStressStart.exe
+            out/DiskStress.ini
