@@ -68,7 +68,7 @@ static void WINAPI ServiceMain(DWORD, LPWSTR*) {
     ZeroMemory(&g_svcStatus, sizeof(g_svcStatus));
     ReportSvcStatus(SERVICE_START_PENDING, NO_ERROR, 10000);
 
-    Config cfg = LoadConfig(GetExeDir());
+    Config cfg = DefaultConfig();
     EnsureDir(cfg.stateDir);
     EnsureDir(cfg.reportDir);
 
@@ -176,7 +176,7 @@ static bool RemoveService(std::wstring& msg) {
 // ------------------------------------------------------------------ main ---
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    Config cfg = LoadConfig(GetExeDir());
+    Config cfg = DefaultConfig();
     EnsureDir(cfg.stateDir);
 
     std::wstring arg;

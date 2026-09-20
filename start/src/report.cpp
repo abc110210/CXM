@@ -209,11 +209,9 @@ bool WriteReport(const Config& cfg,
 
     o += L"\r\n[2] 测试配置\r\n--------------------------------------------------------------------------------\r\n";
     KV(o, L"压力文件路径", cfg.filePath);
-    KV(o, L"逻辑工作集  ", FormatBytes(cfg.workingSetBytes) + L"  (" + FormatInt(cfg.workingSetBytes) +
-                        L" bytes) 随机偏移覆盖范围");
-    KV(o, L"占用封顶    ", cfg.physCapBytes
-                        ? FormatBytes(cfg.physCapBytes) + L"  达到后删除压力文件并重新生成"
-                        : L"不封顶（按逻辑工作集常驻，慎用）");
+    KV(o, L"固定覆盖区  ", FormatBytes(cfg.workingSetBytes) + L"  (" + FormatInt(cfg.workingSetBytes) +
+                        L" bytes) 随机偏移范围 = 占用上限");
+    KV(o, L"占用控制    ", std::wstring(L"覆盖写入：文件长度固定，只在已有区间内反复覆盖，不会增长"));
     KV(o, L"退出时删除  ", cfg.deleteOnExit ? L"是（停止后压力文件被删除，占用归零）" : L"否");
     KV(o, L"单次写入块  ", FormatBytes(cfg.blockBytes) + L"  (" + FormatInt(cfg.blockBytes) + L" bytes)");
     KV(o, L"写入方式    ", std::wstring(L"随机偏移，每块写满后调用 FlushFileBuffers (fsync)"));
@@ -258,9 +256,7 @@ bool WriteReport(const Config& cfg,
     KV(o, L"总写入次数  ", FormatInt(st.writes));
     KV(o, L"总写入字节  ", FormatBytes(st.bytes) + L"  (" + FormatInt(st.bytes) + L" bytes)");
     KV(o, L"实际占用(采样)", FormatBytes(st.allocatedBytes) + L"  (上限 " +
-                          (cfg.physCapBytes ? FormatBytes(cfg.physCapBytes) : L"不限") + L")");
-    KV(o, L"封顶重建次数", FormatInt(st.resets) + L" 次（每次约 " +
-                        (cfg.physCapBytes ? FormatBytes(cfg.physCapBytes) : L"0 B") + L" 被删除重建）");
+                          FormatBytes(cfg.workingSetBytes) + L"，覆盖写不会超过)");
     KV(o, L"平均 IOPS   ", FormatDouble((double)st.writes / secs, 3) + L" ops/s");
     KV(o, L"平均吞吐    ", FormatDouble((double)st.bytes / secs / (1024.0 * 1024.0), 3) + L" MiB/s (含 fsync 等待)");
     KV(o, L"写入延迟    ", L"平均 " + UsToMs(st.writes ? st.sumWriteUs / st.writes : 0) +
@@ -302,14 +298,14 @@ bool WriteReport(const Config& cfg,
     o += L"  * 每次 4KiB 写入后立即 fsync，吞吐受限于单次落盘延迟，数值偏低属正常现象。\r\n";
     o += L"  * 工作集大于 SSD 缓存时，IOPS 曲线跌阶可反映 SLC 缓存耗尽后的真实颗粒写入性能。\r\n";
     o += L"  * 分段统计表可用于观察缓内 / 缓外两个阶段的性能变化。\r\n";
-    o += L"  * 磁盘占用采用「封顶重建」：压力文件放在系统 TMP 目录，随机偏移覆盖整个逻辑工作集；\r\n";
-    o += L"    当真实占用达到封顶值时，整个文件被删除并重新生成，因此占用始终不超过封顶值。\r\n";
+    o += L"  * 磁盘占用采用「固定覆盖区」：压力文件放在系统 TMP 目录，长度固定，随机偏移只在\r\n";
+    o += L"    该区间内反复覆盖，文件不会增长，真实占用最多等于覆盖区大小。\r\n";
     o += L"  * 压力文件为专用测试文件，请勿指向任何有用数据文件，程序会按工作集大小重置其长度。\r\n";
     o += L"\r\n================================ 报告结束 ========================================\r\n";
 
     bool ok = WriteTextFileUtf8(path, o);
     if (ok) {
-        RotateReports(cfg.reportDir, 3);
+        RotateReports(cfg.reportDir, (int)kMaxReports);
         if (outPath) *outPath = path;
     }
     return ok;

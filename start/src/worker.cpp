@@ -12,28 +12,6 @@ static const wchar_t* REASON_PERIODIC = L"周期报告（每 5 小时一份）";
 static const wchar_t* REASON_STOPPED  = L"收到停止指令（DiskStress 控制台）";
 static const wchar_t* REASON_ERROR    = L"连续 I/O 错误，程序自我保护退出";
 
-// Delete the stress file and create a fresh one, so real disk usage never exceeds the ceiling.
-static bool RecreateStressFile(HANDLE& hFile, const Config& cfg, bool noBuf) {
-    if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
-    hFile = INVALID_HANDLE_VALUE;
-    DeleteFileW(cfg.filePath.c_str());
-
-    DWORD flags = FILE_FLAG_RANDOM_ACCESS;
-    if (noBuf) flags |= FILE_FLAG_NO_BUFFERING;
-    HANDLE h = CreateFileW(cfg.filePath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, NULL,
-                           CREATE_ALWAYS, flags, NULL);
-    if (h == INVALID_HANDLE_VALUE) return false;
-
-    LARGE_INTEGER target;
-    target.QuadPart = (LONGLONG)cfg.workingSetBytes;
-    SetFilePointerEx(h, target, NULL, FILE_BEGIN);
-    if (!SetEndOfFile(h)) { CloseHandle(h); return false; }
-    FlushFileBuffers(h);
-
-    hFile = h;
-    return true;
-}
-
 int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) {
     Config cfg = cfgIn;
 
@@ -50,27 +28,17 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
     // --- keep the system awake during the stress run ---
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
 
-    // --- keep a sane budget vs. free disk space ---
+    // --- never eat more than half of what is left on the volume ---
     {
         ULARGE_INTEGER freeBytes;
         std::wstring root = (cfg.filePath.size() >= 2 && cfg.filePath[1] == L':')
                                 ? cfg.filePath.substr(0, 2) + L"\\" : L"C:\\";
         if (GetDiskFreeSpaceExW(root.c_str(), &freeBytes, NULL, NULL)) {
-            uint64_t freeB = (uint64_t)freeBytes.QuadPart;
-            if (cfg.physCapBytes > 0) {
-                uint64_t budget = (uint64_t)((double)freeB * 0.5);
-                budget = (budget / cfg.blockBytes) * cfg.blockBytes;
-                if (cfg.physCapBytes > budget) {
-                    cfg.physCapBytes = budget;
-                    AppendLog(cfg.stateDir, L"[worker] physical cap clamped by free disk space");
-                }
-            } else {
-                uint64_t budget = (uint64_t)((double)freeB * 0.8);
-                budget = (budget / cfg.blockBytes) * cfg.blockBytes;
-                if (budget < cfg.workingSetBytes) {
-                    cfg.workingSetBytes = budget;
-                    AppendLog(cfg.stateDir, L"[worker] working set clamped by free disk space");
-                }
+            uint64_t budget = (uint64_t)((double)freeBytes.QuadPart * 0.5);
+            budget = (budget / cfg.blockBytes) * cfg.blockBytes;
+            if (budget < cfg.workingSetBytes) {
+                cfg.workingSetBytes = budget;
+                AppendLog(cfg.stateDir, L"[worker] working set clamped by free disk space");
             }
         }
     }
@@ -223,25 +191,10 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
             break;
         }
 
-        // sample real usage; once the ceiling is hit, delete the file and start over
+        // sample the real on-disk usage (it can only grow up to the fixed working set)
         if (stats.writes % 512 == 0) {
             uint64_t allocated = GetFileAllocatedBytes(hFile);
             if (allocated > 0) stats.allocatedBytes = allocated;
-
-            if (cfg.physCapBytes > 0 && allocated >= cfg.physCapBytes) {
-                if (RecreateStressFile(hFile, cfg, noBuf)) {
-                    stats.resets++;
-                    stats.allocatedBytes = 0;
-                    AppendLog(cfg.stateDir,
-                              L"[worker] ceiling reached (" + FormatBytes(cfg.physCapBytes) +
-                              L"), stress file deleted and recreated");
-                } else {
-                    AppendLog(cfg.stateDir, L"[worker] recreate failed, error=" +
-                              FormatInt(GetLastError()));
-                    reason = REASON_ERROR;
-                    break;
-                }
-            }
         }
 
         LARGE_INTEGER now;

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <cwchar>
 
 std::wstring GetExeDir() {
     wchar_t path[MAX_PATH] = {0};
@@ -41,93 +40,30 @@ bool EnsureDir(const std::wstring& dir) {
     return true;
 }
 
-static uint64_t ParseUInt(const std::wstring& s, uint64_t defVal) {
-    if (s.empty()) return defVal;
-    uint64_t v = 0;
-    for (size_t i = 0; i < s.size(); i++) {
-        if (s[i] < L'0' || s[i] > L'9') return defVal;
-        v = v * 10 + (uint64_t)(s[i] - L'0');
-    }
-    return v;
-}
-
-static double ParseDouble(const std::wstring& s, double defVal) {
-    if (s.empty()) return defVal;
-    double v = _wtof(s.c_str());
-    if (v <= 0) return defVal;
-    return v;
-}
-
-Config LoadConfig(const std::wstring& exeDir) {
+Config DefaultConfig() {
     Config cfg;
-    cfg.stateDir          = L"C:\\ProgramData\\DiskStress";
-    cfg.reportDir         = L"C:\\ProgramData\\DiskStress\\reports";
+    cfg.stateDir  = kStateDir;
+    cfg.reportDir = kReportDir;
 
-    // default scratch file lives in the system TMP dir (normally on C:)
-    {
-        wchar_t tmp[MAX_PATH + 1] = {0};
-        DWORD tn = GetTempPathW(MAX_PATH, tmp);
-        std::wstring tmpDir = (tn > 0 && tn <= MAX_PATH && tmp[0] != L'\0')
-                                  ? std::wstring(tmp, tn) : L"C:\\Windows\\Temp\\";
-        if (tmpDir.empty() || tmpDir.back() != L'\\') tmpDir += L'\\';
-        cfg.filePath = tmpDir + L"DiskStress\\stress.dat";
-    }
+    // scratch file lives in the system TMP dir (normally on C:)
+    wchar_t tmp[MAX_PATH + 1] = {0};
+    DWORD tn = GetTempPathW(MAX_PATH, tmp);
+    std::wstring tmpDir = (tn > 0 && tn <= MAX_PATH && tmp[0] != L'\0')
+                              ? std::wstring(tmp, tn) : L"C:\\Windows\\Temp\\";
+    if (tmpDir.empty() || tmpDir.back() != L'\\') tmpDir += L'\\';
+    cfg.filePath = tmpDir + kStressFileSubDir + L"\\" + kStressFileName;
 
-    cfg.workingSetBytes   = (uint64_t)10 * 1024 * 1024 * 1024; // 10 GiB logical span
-    cfg.blockBytes        = 4096;
-    cfg.physCapBytes      = (uint64_t)10 * 1024 * 1024 * 1024; // 10 GiB ceiling
-    cfg.reportIntervalSec = 18000; // 5 hours
-    cfg.segmentSec        = 600;   // 10 minutes
-    cfg.noBuffering       = true;
-    cfg.deleteOnExit      = true;
+    cfg.workingSetBytes   = kWorkingSetBytes;
+    cfg.blockBytes        = kBlockBytes;
+    cfg.reportIntervalSec = kReportIntervalSec;
+    cfg.segmentSec        = kSegmentSec;
+    cfg.noBuffering       = kNoBuffering;
+    cfg.deleteOnExit      = kDeleteOnExit;
 
-    std::wstring ini = exeDir + L"\\" + INI_FILE;
-    wchar_t buf[1024];
-
-    auto readStr = [&](const wchar_t* key, const std::wstring& def) -> std::wstring {
-        DWORD n = GetPrivateProfileStringW(L"DiskStress", key, def.c_str(), buf, 1024, ini.c_str());
-        return std::wstring(buf, n);
-    };
-
-    std::wstring v;
-
-    v = readStr(L"StateDir", cfg.stateDir);   if (!v.empty()) cfg.stateDir = v;
-    v = readStr(L"FilePath", cfg.filePath);   if (!v.empty()) cfg.filePath = v;
-    v = readStr(L"ReportDir", cfg.reportDir); if (!v.empty()) cfg.reportDir = v;
-
-    v = readStr(L"WorkingSetGiB", L"10");
-    double gib = ParseDouble(v, 10.0);
-    cfg.workingSetBytes = (uint64_t)(gib * 1024.0 * 1024.0 * 1024.0);
-
-    cfg.blockBytes = (uint64_t)ParseUInt(readStr(L"BlockBytes", L"4096"), 4096);
-    if (cfg.blockBytes < 512) cfg.blockBytes = 512;
-    if (cfg.blockBytes > 1024 * 1024) cfg.blockBytes = 1024 * 1024;
-
-    cfg.reportIntervalSec = (uint32_t)ParseUInt(readStr(L"ReportIntervalMinutes", L"300"), 300) * 60;
-    if (cfg.reportIntervalSec < 60) cfg.reportIntervalSec = 60;
-
-    cfg.segmentSec = (uint32_t)ParseUInt(readStr(L"SegmentMinutes", L"10"), 10) * 60;
-    if (cfg.segmentSec < 10) cfg.segmentSec = 10;
-
-    cfg.noBuffering = ParseUInt(readStr(L"NoBuffering", L"1"), 1) != 0;
-
-    v = readStr(L"PhysicalCapGiB", L"10");
-    double capGib = ParseDouble(v, 10.0);
-    cfg.physCapBytes = (uint64_t)(capGib * 1024.0 * 1024.0 * 1024.0);
-
-    cfg.deleteOnExit = ParseUInt(readStr(L"DeleteFileOnExit", L"1"), 1) != 0;
-
-    // keep block aligned and working set a multiple of the block size
-    uint64_t align = 4096;
+    // keep the block aligned and the working set a whole multiple of it
+    const uint64_t align = 4096;
     cfg.blockBytes = ((cfg.blockBytes + align - 1) / align) * align;
     cfg.workingSetBytes = ((cfg.workingSetBytes + cfg.blockBytes - 1) / cfg.blockBytes) * cfg.blockBytes;
-
-    if (cfg.physCapBytes >= cfg.blockBytes) {
-        cfg.physCapBytes = ((cfg.physCapBytes + cfg.blockBytes - 1) / cfg.blockBytes) * cfg.blockBytes;
-    } else {
-        cfg.physCapBytes = 0; // 0 = no cap, keep the full working set resident
-    }
-    if (cfg.physCapBytes > cfg.workingSetBytes) cfg.physCapBytes = cfg.workingSetBytes;
 
     return cfg;
 }

@@ -19,24 +19,37 @@
 #define REPORT_EXT      L".txt"
 #define PID_FILE        L"worker.pid"
 #define LOG_FILE        L"stop.log"
-#define INI_FILE        L"DiskStress.ini"
+
+// ---------------------------------------------------------------------------
+// 固定参数：全部写死在这里，改完重新编译即可（不再读取 ini）
+// ---------------------------------------------------------------------------
+const uint64_t   kWorkingSetBytes   = 2ULL * 1024 * 1024 * 1024; // 2 GiB 固定覆盖区
+const uint64_t   kBlockBytes        = 4096;                      // 单次写入 4 KiB
+const uint32_t   kReportIntervalSec = 18000;                     // 5 小时一份报告
+const uint32_t   kSegmentSec        = 600;                       // 分段窗口 10 分钟
+const uint32_t   kMaxReports        = 3;                         // 报告最多保留 3 份
+const bool       kNoBuffering       = true;                      // 绕过系统缓存
+const bool       kDeleteOnExit      = true;                      // 停止时删除压力文件
+constexpr const wchar_t* kStateDir         = L"C:\\ProgramData\\DiskStress";
+constexpr const wchar_t* kReportDir        = L"C:\\ProgramData\\DiskStress\\reports";
+constexpr const wchar_t* kStressFileSubDir = L"DiskStress";      // 位于系统 TMP 目录下
+constexpr const wchar_t* kStressFileName   = L"stress.dat";
 
 struct Config {
-    std::wstring stateDir;          // C:\ProgramData\DiskStress
-    std::wstring filePath;          // stress data file
-    std::wstring reportDir;         // report output dir
-    uint64_t     workingSetBytes;   // logical span of random offsets (exceeds SSD cache)
-    uint64_t     blockBytes;        // 4096
-    uint64_t     physCapBytes;      // real usage ceiling; reached -> delete file and recreate
-    uint32_t     reportIntervalSec; // 18000 = 5h
-    uint32_t     segmentSec;        // 600 = 10min
-    bool         noBuffering;       // FILE_FLAG_NO_BUFFERING
-    bool         deleteOnExit;      // delete the stress file when the worker stops
+    std::wstring stateDir;
+    std::wstring filePath;          // TMP\DiskStress\stress.dat
+    std::wstring reportDir;
+    uint64_t     workingSetBytes;   // 固定覆盖区大小（= 占用上限）
+    uint64_t     blockBytes;
+    uint32_t     reportIntervalSec;
+    uint32_t     segmentSec;
+    bool         noBuffering;
+    bool         deleteOnExit;
 };
 
 // ---- paths & config ----
 std::wstring GetExeDir();
-Config      LoadConfig(const std::wstring& exeDir);
+Config      DefaultConfig();        // 写死的参数，不再读 ini
 bool        EnsureDir(const std::wstring& dir);
 
 // ---- disk footprint control ----

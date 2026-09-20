@@ -35,7 +35,6 @@ struct Stats {
     uint64_t bytes;
     uint64_t writeErrors;
     uint64_t syncErrors;
-    uint64_t resets;           // times the file was deleted and recreated after hitting the ceiling
     uint64_t allocatedBytes;   // last sampled real on-disk size
     double   sumWriteUs;
     double   sumSyncUs;
@@ -49,7 +48,7 @@ struct Stats {
 
     Stats()
         : writes(0), bytes(0), writeErrors(0), syncErrors(0),
-          resets(0), allocatedBytes(0),
+          allocatedBytes(0),
           sumWriteUs(0), sumSyncUs(0),
           minWriteUs(1e18), maxWriteUs(0),
           minSyncUs(1e18), maxSyncUs(0) {}
