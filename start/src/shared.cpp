@@ -71,6 +71,29 @@ Config DefaultConfig() {
     return cfg;
 }
 
+void ResolveWritableDirs(Config& cfg, const std::wstring& exeDir) {
+    if (EnsureDir(cfg.stateDir) && EnsureDir(cfg.reportDir)) return;
+
+    std::vector<std::wstring> bases;
+    if (!exeDir.empty()) bases.push_back(exeDir + L"\\DiskStress");
+    wchar_t tmp[MAX_PATH + 1] = {0};
+    if (GetTempPathW(MAX_PATH, tmp) && tmp[0] != L'\0') {
+        std::wstring t(tmp);
+        if (!t.empty() && t.back() == L'\\') t.pop_back();
+        bases.push_back(t + L"\\DiskStress");
+    }
+
+    for (size_t i = 0; i < bases.size(); i++) {
+        std::wstring st = bases[i];
+        std::wstring rp = bases[i] + L"\\reports";
+        if (EnsureDir(st) && EnsureDir(rp)) {
+            cfg.stateDir  = st;
+            cfg.reportDir = rp;
+            return;
+        }
+    }
+}
+
 std::wstring FormatTime(const SYSTEMTIME& st) {
     wchar_t b[64];
     swprintf(b, 64, L"%04u-%02u-%02u %02u:%02u:%02u",

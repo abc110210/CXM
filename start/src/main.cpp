@@ -69,8 +69,7 @@ static void WINAPI ServiceMain(DWORD, LPWSTR*) {
     ReportSvcStatus(SERVICE_START_PENDING, NO_ERROR, 10000);
 
     Config cfg = DefaultConfig();
-    EnsureDir(cfg.stateDir);
-    EnsureDir(cfg.reportDir);
+    ResolveWritableDirs(cfg, GetExeDir());
     AppendDebugLog(cfg.stateDir, L"[OK]   服务入口 | SCM 已调用 ServiceMain，正在注册控制处理器");
 
     // 防止多开：服务模式同样检查全局单实例
@@ -195,7 +194,7 @@ static bool RemoveService(std::wstring& msg) {
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     Config cfg = DefaultConfig();
-    EnsureDir(cfg.stateDir);
+    ResolveWritableDirs(cfg, GetExeDir());
 
     std::wstring arg;
     if (__argc > 1) arg = __wargv[1];
@@ -260,6 +259,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     EnsureDir(cfg.reportDir);
     AppendLog(cfg.stateDir, L"[run] DiskStress started (interactive silent mode)");
+    AppendDebugLog(cfg.stateDir, L"[OK]   日志目录 | 状态=" + cfg.stateDir +
+                   L"，报告=" + cfg.reportDir);
     int rc = RunWorker(cfg, hGlobal, hLocal, NULL);
     AppendDebugLog(cfg.stateDir, L"[OK]   写入循环结束 | 返回码=" + FormatInt((uint64_t)rc));
     AppendLog(cfg.stateDir, L"[run] DiskStress stopped");

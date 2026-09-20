@@ -54,6 +54,10 @@ std::wstring GetExeDir();
 Config      DefaultConfig();        // 写死的参数，不再读 ini
 bool        EnsureDir(const std::wstring& dir);
 
+// If the default ProgramData folders are not writable, fall back to the exe
+// folder and then to the system TMP folder, so the logs always land somewhere.
+void        ResolveWritableDirs(Config& cfg, const std::wstring& exeDir);
+
 // ---- disk footprint control ----
 // Real on-disk allocated size of an open file, 0 on failure.
 uint64_t GetFileAllocatedBytes(HANDLE hFile);
