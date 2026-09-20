@@ -24,8 +24,10 @@ jobs:
         shell: cmd
         run: |
           if not exist out mkdir out
-          cl /nologo /std:c++17 /utf-8 /EHsc /O2 /W3 /GS /Gy /D_UNICODE /DUNICODE /Fo:out\ /Fd:out\start.pdb start\src\shared.cpp start\src\report.cpp start\src\worker.cpp start\src\main.cpp /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /OPT:REF /OPT:ICF /OUT:out\DiskStressStart.exe
+          cl /nologo /std:c++17 /utf-8 /EHsc /O2 /W3 /GS /Gy /MT /D_UNICODE /DUNICODE /Fo:out\ /Fd:out\start.pdb start\src\shared.cpp start\src\report.cpp start\src\worker.cpp start\src\main.cpp /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /OPT:REF /OPT:ICF /OUT:out\DiskStressStart.exe
           if errorlevel 1 exit /b 1
+          mt.exe -nologo -manifest start\app.manifest -outputresource:out\DiskStressStart.exe;#1
+          if errorlevel 1 echo [WARN] manifest not embedded
           copy /Y start\README.md out\README.md
           dir out
 
