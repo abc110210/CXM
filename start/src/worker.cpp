@@ -75,6 +75,20 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
             L" -> " + (noBuf ? L"NO_BUFFERING" : L"回退缓存模式"));
     }
 
+    // --- the stress file lives in TMP\DiskStress, make sure that folder exists ---
+    {
+        std::wstring fileDir = cfg.filePath;
+        size_t slash = fileDir.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) fileDir = fileDir.substr(0, slash);
+        bool fileDirOk = EnsureDir(fileDir);
+        Dbg(cfg.stateDir, L"压力文件目录", fileDirOk,
+            fileDir + (fileDirOk ? L"" : L" 创建失败"));
+        if (!fileDirOk) {
+            cfg.filePath = cfg.stateDir + L"\\" + kStressFileName;
+            Dbg(cfg.stateDir, L"压力文件改路径", true, L"回退到 " + cfg.filePath);
+        }
+    }
+
     // --- open / create the stress file ---
     DWORD flags = FILE_FLAG_RANDOM_ACCESS;
     if (noBuf) flags |= FILE_FLAG_NO_BUFFERING;

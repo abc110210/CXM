@@ -117,27 +117,49 @@ static bool InstallService(std::wstring& msg) {
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
     if (!scm) { msg = L"OpenSCManager failed, error=" + FormatInt(GetLastError()); return false; }
 
-    SC_HANDLE exist = OpenServiceW(scm, SERVICE_NAME, SERVICE_QUERY_STATUS);
-    if (exist) {
-        CloseServiceHandle(exist);
-        CloseServiceHandle(scm);
-        msg = L"service already installed";
-        return true;
-    }
+    // upsert: create it, or re-point an existing one at the current exe path
+    SC_HANDLE svc = OpenServiceW(scm, SERVICE_NAME, SERVICE_ALL_ACCESS);
+    bool updated = (svc != NULL);
 
-    SC_HANDLE svc = CreateServiceW(scm, SERVICE_NAME, SERVICE_DISPLAY,
-                                   SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
-                                   SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-                                   cmd.c_str(), NULL, NULL, NULL, NULL, NULL);
     if (!svc) {
-        msg = L"CreateService failed (needs administrator), error=" + FormatInt(GetLastError());
-        CloseServiceHandle(scm);
-        return false;
+        svc = CreateServiceW(scm, SERVICE_NAME, SERVICE_DISPLAY,
+                             SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+                             SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                             cmd.c_str(), NULL, NULL, NULL, NULL, NULL);
+        if (!svc) {
+            msg = L"CreateService failed (needs administrator), error=" + FormatInt(GetLastError());
+            CloseServiceHandle(scm);
+            return false;
+        }
+    } else {
+        // stop the running instance before switching the binary path
+        SERVICE_STATUS st;
+        ZeroMemory(&st, sizeof(st));
+        ControlService(svc, SERVICE_CONTROL_STOP, &st);
+        for (int i = 0; i < 60; i++) {
+            ZeroMemory(&st, sizeof(st));
+            if (!QueryServiceStatus(svc, &st)) break;
+            if (st.dwCurrentState == SERVICE_STOPPED) break;
+            Sleep(1000);
+        }
+        if (!ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, SERVICE_AUTO_START, SERVICE_NO_CHANGE,
+                                  cmd.c_str(), NULL, NULL, NULL, NULL, NULL, NULL)) {
+            msg = L"ChangeServiceConfig failed, error=" + FormatInt(GetLastError());
+            CloseServiceHandle(svc);
+            CloseServiceHandle(scm);
+            return false;
+        }
     }
 
     SERVICE_DESCRIPTION desc;
     desc.lpDescription = (LPWSTR)L"4 KiB 随机写入 + 每次 fsync 的磁盘压力测试，开机自动运行。";
     ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
+
+    // delayed auto start: boots a bit later, after the busiest boot I/O is over
+    SERVICE_DELAYED_AUTO_START_INFO dai;
+    ZeroMemory(&dai, sizeof(dai));
+    dai.fDelayedAutostart = TRUE;
+    ChangeServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, &dai);
 
     // restart the stress run if it ever dies on its own
     SC_ACTION actions[3];
@@ -152,8 +174,11 @@ static bool InstallService(std::wstring& msg) {
     ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &fa);
 
     BOOL started = StartServiceW(svc, 0, NULL);
-    msg = started ? L"service installed and started"
-                  : L"service installed, StartService failed, error=" + FormatInt(GetLastError());
+    std::wstring tail;
+    if (started) tail = L" and started";
+    else tail = L", StartService failed, error=" + FormatInt(GetLastError());
+    msg = std::wstring(updated ? L"service updated to " : L"service installed at ")
+          + std::wstring(path) + tail;
 
     CloseServiceHandle(svc);
     CloseServiceHandle(scm);
