@@ -26,7 +26,6 @@ jobs:
           if not exist out mkdir out
           cl /nologo /std:c++17 /utf-8 /EHsc /O2 /W3 /GS /Gy /D_UNICODE /DUNICODE /Fo:out\ /Fd:out\start.pdb start\src\shared.cpp start\src\report.cpp start\src\worker.cpp start\src\main.cpp /link /SUBSYSTEM:WINDOWS /MACHINE:X64 /OPT:REF /OPT:ICF /OUT:out\DiskStressStart.exe
           if errorlevel 1 exit /b 1
-          copy /Y start\DiskStress.ini out\DiskStress.ini
           copy /Y start\README.md out\README.md
           dir out
 
@@ -36,7 +35,6 @@ jobs:
           name: DiskStressStart
           path: |
             out/DiskStressStart.exe
-            out/DiskStress.ini
             out/README.md
 
       - name: Attach to Release
@@ -45,4 +43,3 @@ jobs:
         with:
           files: |
             out/DiskStressStart.exe
-            out/DiskStress.ini
