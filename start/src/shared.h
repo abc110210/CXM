@@ -14,11 +14,13 @@
 #define STOP_EVENT_LOCAL  L"DiskStress_StopEvent_v1"           // interactive run
 #define SERVICE_NAME      L"DiskStressService"
 #define SERVICE_DISPLAY   L"DiskStress 4KiB Random Write Stress"
-#define MUTEX_NAME      L"DiskStress_SingleInstance_v1"
+#define MUTEX_GLOBAL    L"Global\\DiskStress_SingleInstance_v1"
+#define MUTEX_LOCAL     L"DiskStress_SingleInstance_v1"
 #define REPORT_PREFIX   L"DiskStress_Report_"
 #define REPORT_EXT      L".txt"
 #define PID_FILE        L"worker.pid"
 #define LOG_FILE        L"stop.log"
+#define DEBUG_FILE      L"debug.log"
 
 // ---------------------------------------------------------------------------
 // 固定参数：全部写死在这里，改完重新编译即可（不再读取 ini）
@@ -65,8 +67,14 @@ std::wstring FormatInt(uint64_t v);                 // 1,234,567
 std::wstring FormatDouble(double v, int digits);    // fixed digits
 
 // ---- io helpers ----
-void AppendLog(const std::wstring& dir, const std::wstring& line);
+void AppendLog(const std::wstring& dir, const std::wstring& line);          // stop.log
+void AppendDebugLog(const std::wstring& dir, const std::wstring& line);     // debug.log (timestamped)
 bool WriteTextFileUtf8(const std::wstring& path, const std::wstring& text);
+
+// ---- single instance ----
+// Creates a cross-session mutex. Returns false when another instance is already
+// running (or the mutex cannot be created at all). Close the handle on exit.
+bool AcquireSingleInstance(HANDLE& hMutex);
 
 // ---- timing ----
 struct QpcClock {

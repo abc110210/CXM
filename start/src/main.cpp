@@ -71,23 +71,41 @@ static void WINAPI ServiceMain(DWORD, LPWSTR*) {
     Config cfg = DefaultConfig();
     EnsureDir(cfg.stateDir);
     EnsureDir(cfg.reportDir);
+    AppendDebugLog(cfg.stateDir, L"[OK]   服务入口 | SCM 已调用 ServiceMain，正在注册控制处理器");
+
+    // 防止多开：服务模式同样检查全局单实例
+    HANDLE hSingle = NULL;
+    if (!AcquireSingleInstance(hSingle)) {
+        AppendLog(cfg.stateDir, L"[service] another instance is already running, abort start");
+        AppendDebugLog(cfg.stateDir, L"[FAIL] 单实例检查 | 已有实例在运行，服务启动中止");
+        ReportSvcStatus(SERVICE_STOPPED, ERROR_SERVICE_ALREADY_RUNNING, 0);
+        return;
+    }
+    AppendDebugLog(cfg.stateDir, L"[OK]   单实例检查 | 全局互斥体已持有，无其他实例");
 
     g_hSvcStop = CreateEventW(NULL, TRUE, FALSE, NULL);
     HANDLE hGlobal = CreateGlobalStopEvent();
     HANDLE hLocal  = CreateEventW(NULL, TRUE, FALSE, STOP_EVENT_LOCAL);
     if (hGlobal) ResetEvent(hGlobal);
     if (hLocal)  ResetEvent(hLocal);
+    AppendDebugLog(cfg.stateDir, L"[OK]   停止事件 | Global=" +
+                   std::wstring(hGlobal ? L"已创建" : L"不可用") +
+                   L"，会话内=" + std::wstring(hLocal ? L"已创建" : L"不可用"));
 
     AppendLog(cfg.stateDir, L"[service] DiskStress service starting");
     ReportSvcStatus(SERVICE_RUNNING, NO_ERROR, 0);
+    AppendDebugLog(cfg.stateDir, L"[OK]   服务状态 | 已上报 SERVICE_RUNNING");
 
-    RunWorker(cfg, hGlobal, hLocal, g_hSvcStop);
+    int rc = RunWorker(cfg, hGlobal, hLocal, g_hSvcStop);
+    AppendDebugLog(cfg.stateDir, L"[OK]   写入循环结束 | 返回码=" + FormatInt((uint64_t)rc));
 
     AppendLog(cfg.stateDir, L"[service] DiskStress service stopped");
     if (hGlobal) CloseHandle(hGlobal);
     if (hLocal)  CloseHandle(hLocal);
     if (g_hSvcStop) CloseHandle(g_hSvcStop);
+    if (hSingle)  CloseHandle(hSingle);
     ReportSvcStatus(SERVICE_STOPPED, NO_ERROR, 0);
+    AppendDebugLog(cfg.stateDir, L"[OK]   服务状态 | 已上报 SERVICE_STOPPED，进程即将退出");
 }
 
 // ------------------------------------------------------- install / remove ---
@@ -182,16 +200,24 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::wstring arg;
     if (__argc > 1) arg = __wargv[1];
 
+    AppendDebugLog(cfg.stateDir, L"[OK]   进程启动 | 参数=[" + arg + L"]，PID=" +
+                   FormatInt(GetCurrentProcessId()));
+    AppendDebugLog(cfg.stateDir, L"[OK]   配置加载 | 压力文件=" + cfg.filePath +
+                   L"，覆盖区=" + FormatBytes(cfg.workingSetBytes) +
+                   L"，报告目录=" + cfg.reportDir);
+
     if (arg == L"--install" || arg == L"-i") {
         std::wstring msg;
-        InstallService(msg);
+        bool ok = InstallService(msg);
         AppendLog(cfg.stateDir, L"[install] " + msg);
+        AppendDebugLog(cfg.stateDir, (ok ? L"[OK]   安装服务 | " : L"[FAIL] 安装服务 | ") + msg);
         return 0;
     }
     if (arg == L"--uninstall" || arg == L"-u") {
         std::wstring msg;
-        RemoveService(msg);
+        bool ok = RemoveService(msg);
         AppendLog(cfg.stateDir, L"[uninstall] " + msg);
+        AppendDebugLog(cfg.stateDir, (ok ? L"[OK]   卸载服务 | " : L"[FAIL] 卸载服务 | ") + msg);
         return 0;
     }
 
@@ -201,34 +227,45 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         table[0].lpServiceProc = ServiceMain;
         table[1].lpServiceName = NULL;
         table[1].lpServiceProc = NULL;
+        AppendDebugLog(cfg.stateDir, L"[OK]   服务模式 | 正在连接 SCM 控制分发器");
         if (!StartServiceCtrlDispatcherW(table)) {
             AppendLog(cfg.stateDir, L"[service] StartServiceCtrlDispatcher failed, error=" +
                       FormatInt(GetLastError()));
+            AppendDebugLog(cfg.stateDir, L"[FAIL] 服务模式 | StartServiceCtrlDispatcher 失败 err=" +
+                           FormatInt(GetLastError()) + L"（必须由 SCM 启动，勿手动加 --service）");
             return 1;
         }
         return 0;
     }
 
     // --- interactive silent run: single instance + stop events ---
-    HANDLE hMutex = CreateMutexW(NULL, TRUE, MUTEX_NAME);
-    if (!hMutex) return 2;
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+    AppendDebugLog(cfg.stateDir, L"[OK]   交互模式 | 双击启动，无参数，PID=" +
+                   FormatInt(GetCurrentProcessId()));
+
+    HANDLE hMutex = NULL;
+    if (!AcquireSingleInstance(hMutex)) {
         AppendLog(cfg.stateDir, L"[run] another instance is already running, exit.");
+        AppendDebugLog(cfg.stateDir, L"[FAIL] 单实例检查 | 已有实例在运行（含服务模式），本次直接退出");
         return 0;
     }
+    AppendDebugLog(cfg.stateDir, L"[OK]   单实例检查 | 全局互斥体已持有，无其他实例");
 
     HANDLE hGlobal = CreateGlobalStopEvent();
     HANDLE hLocal  = CreateEventW(NULL, TRUE, FALSE, STOP_EVENT_LOCAL);
     if (hGlobal) ResetEvent(hGlobal);
     if (hLocal)  ResetEvent(hLocal);
+    AppendDebugLog(cfg.stateDir, L"[OK]   停止事件 | Global=" +
+                   std::wstring(hGlobal ? L"已创建" : L"不可用") +
+                   L"，会话内=" + std::wstring(hLocal ? L"已创建" : L"不可用"));
 
     EnsureDir(cfg.reportDir);
     AppendLog(cfg.stateDir, L"[run] DiskStress started (interactive silent mode)");
     int rc = RunWorker(cfg, hGlobal, hLocal, NULL);
+    AppendDebugLog(cfg.stateDir, L"[OK]   写入循环结束 | 返回码=" + FormatInt((uint64_t)rc));
     AppendLog(cfg.stateDir, L"[run] DiskStress stopped");
 
     if (hGlobal) CloseHandle(hGlobal);
     if (hLocal)  CloseHandle(hLocal);
-    CloseHandle(hMutex);
+    if (hMutex)  CloseHandle(hMutex);
     return rc;
 }

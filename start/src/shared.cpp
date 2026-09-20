@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <sddl.h>
+
+#pragma comment(lib, "advapi32.lib")
 
 std::wstring GetExeDir() {
     wchar_t path[MAX_PATH] = {0};
@@ -124,9 +127,10 @@ std::wstring FormatDouble(double v, int digits) {
     return std::wstring(b);
 }
 
-void AppendLog(const std::wstring& dir, const std::wstring& line) {
+static void AppendToFile(const std::wstring& dir, const std::wstring& fileName,
+                         const std::wstring& line) {
     if (!EnsureDir(dir)) return;
-    std::wstring path = dir + L"\\" + LOG_FILE;
+    std::wstring path = dir + L"\\" + fileName;
     bool needBom = (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES);
 
     int len = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), (int)line.size(), NULL, 0, NULL, NULL);
@@ -145,6 +149,45 @@ void AppendLog(const std::wstring& dir, const std::wstring& line) {
     DWORD w = 0;
     WriteFile(h, utf8.data(), (DWORD)utf8.size(), &w, NULL);
     CloseHandle(h);
+}
+
+void AppendLog(const std::wstring& dir, const std::wstring& line) {
+    AppendToFile(dir, LOG_FILE, line);
+}
+
+void AppendDebugLog(const std::wstring& dir, const std::wstring& line) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t ts[48];
+    swprintf(ts, 48, L"[%04u-%02u-%02u %02u:%02u:%02u.%03u] ",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    AppendToFile(dir, DEBUG_FILE, std::wstring(ts) + line);
+}
+
+bool AcquireSingleInstance(HANDLE& hMutex) {
+    hMutex = NULL;
+
+    // Global namespace first (works across session 0 / user session), then session-local.
+    SECURITY_ATTRIBUTES sa;
+    ZeroMemory(&sa, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;;0x001F0003;;;SY)(A;;0x001F0003;;;BA)(A;;0x001F0001;;;WD)",
+            SDDL_REVISION_1, &sd, NULL)) {
+        sa.lpSecurityDescriptor = sd;
+    }
+    HANDLE h = CreateMutexW(&sa, TRUE, MUTEX_GLOBAL);
+    if (sd) LocalFree(sd);
+    if (!h) h = CreateMutexW(NULL, TRUE, MUTEX_LOCAL);
+    if (!h) return false;
+
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {   // another instance is running
+        CloseHandle(h);
+        return false;
+    }
+    hMutex = h;
+    return true;
 }
 
 uint64_t GetFileAllocatedBytes(HANDLE hFile) {
