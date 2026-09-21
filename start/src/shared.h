@@ -70,6 +70,7 @@ bool        EnsureDir(const std::wstring& dir);
 bool        SpawnWatchdogProcess(const std::wstring& stateDir);
 void        SignalWatchdogStop(const std::wstring& stateDir);
 // Persisted runtime config: pushed values survive reboots.
+struct CfgVals;   // 前向声明：函数声明区位于 CfgVals 定义之前
 void        PersistRuntimeCfg(const CfgVals& v, const std::wstring& stateDir);
 void        LoadPersistedOverrides(Config& cfg);
 

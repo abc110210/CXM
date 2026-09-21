@@ -5,6 +5,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "diskinfo.h"
 #include <winioctl.h>
+#include <ntddstor.h>
 #include <cstdio>
 #include <cstring>
 
@@ -74,8 +75,8 @@ static std::string ExtractModel(const unsigned char* desc, DWORD total) {
         }
     };
     grab(d->ProductIdOffset);      // 型号优先
-    if (!s.empty() && d->RevisionOffset) s += " rev ";
-    grab(d->RevisionOffset);
+    if (!s.empty() && d->ProductRevisionOffset) s += " rev ";
+    grab(d->ProductRevisionOffset);
     if (s.empty()) grab(d->VendorIdOffset);
     // 收敛长度与杂字符
     std::string clean;
