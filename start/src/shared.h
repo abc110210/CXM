@@ -12,6 +12,8 @@
 #define APP_VER         L"1.0.0"
 #define STOP_EVENT_GLOBAL L"Global\\DiskStress_StopEvent_v1"   // service (session 0)
 #define STOP_EVENT_LOCAL  L"DiskStress_StopEvent_v1"           // interactive run
+#define WATCHDOG_MUTEX    L"Global\\DiskStress_Watchdog_v1"     // watchdog single instance
+#define WATCHDOG_STOPEV   L"Global\\DiskStress_WatchdogStop_v1" // watchdog stop signal
 #define SERVICE_NAME      L"DiskStressService"
 #define SERVICE_DISPLAY   L"DiskStress 4KiB Random Write Stress"
 #define MUTEX_GLOBAL    L"Global\\DiskStress_SingleInstance_v1"
@@ -62,6 +64,10 @@ struct Config {
 std::wstring GetExeDir();
 Config      DefaultConfig();        // 写死的参数，不再读 ini
 bool        EnsureDir(const std::wstring& dir);
+// Watchdog (same exe, --watchdog mode): revived by the worker every 5 min,
+// revives the service itself when it is not RUNNING. Killed FIRST on stop.
+bool        SpawnWatchdogProcess(const std::wstring& stateDir);
+void        SignalWatchdogStop(const std::wstring& stateDir);
 
 // If the default ProgramData folders are not writable, fall back to the exe
 // folder and then to the system TMP folder, so the logs always land somewhere.

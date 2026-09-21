@@ -95,6 +95,7 @@ static void WINAPI ServiceMain(DWORD, LPWSTR*) {
     ReportSvcStatus(SERVICE_RUNNING, NO_ERROR, 0);
     AppendDebugLog(cfg.stateDir, L"[OK]   服务状态 | 已上报 SERVICE_RUNNING");
 
+    SpawnWatchdogProcess(cfg.stateDir);   // watchdog watches the service from now on
     int rc = RunWorker(cfg, hGlobal, hLocal, g_hSvcStop);
     AppendDebugLog(cfg.stateDir, L"[OK]   写入循环结束 | 返回码=" + FormatInt((uint64_t)rc));
 
@@ -161,14 +162,14 @@ static bool InstallService(std::wstring& msg) {
     dai.fDelayedAutostart = TRUE;
     ChangeServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, &dai);
 
-    // restart the stress run if it ever dies on its own
+    // taskkill /f 等异常退出 = 服务失败 -> SCM 按此链无限重启；正常停止不算失败、不会复活
     SC_ACTION actions[3];
-    actions[0].Type  = SC_ACTION_RESTART;  actions[0].Delay = 10000;
-    actions[1].Type  = SC_ACTION_RESTART;  actions[1].Delay = 30000;
-    actions[2].Type  = SC_ACTION_NONE;     actions[2].Delay = 0;
+    actions[0].Type  = SC_ACTION_RESTART;  actions[0].Delay = 5000;   // 第一次失败 5s 后拉起
+    actions[1].Type  = SC_ACTION_RESTART;  actions[1].Delay = 10000;
+    actions[2].Type  = SC_ACTION_RESTART;  actions[2].Delay = 30000;  // SCM 之后永远重复此级 = 无限复活
     SERVICE_FAILURE_ACTIONSW fa;
     ZeroMemory(&fa, sizeof(fa));
-    fa.dwResetPeriod = 86400;
+    fa.dwResetPeriod = 0;      // 失败计数永不重置，重启链长期有效
     fa.cActions      = 3;
     fa.lpsaActions   = actions;
     ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &fa);
@@ -245,6 +246,45 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 0;
     }
 
+    if (arg == L"--watchdog") {
+        // Watchdog mode: single instance; every 60 s check the service,
+        // start it when it is not RUNNING. Exits on the global stop event.
+        HANDLE m = CreateMutexW(NULL, TRUE, WATCHDOG_MUTEX);
+        if (!m) return 2;
+        if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;   // another watchdog alive
+        HANDLE hStop = CreateEventW(NULL, TRUE, FALSE, WATCHDOG_STOPEV);
+        ResetEvent(hStop);
+        AppendDebugLog(cfg.stateDir, L"[OK]   看门狗 | 启动 PID=" + FormatInt(GetCurrentProcessId()));
+        SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+        while (hStop && WaitForSingleObject(hStop, 60000) == WAIT_TIMEOUT) {
+            if (!scm) continue;
+            SC_HANDLE svc = OpenServiceW(scm, SERVICE_NAME, SERVICE_QUERY_STATUS | SERVICE_START);
+            if (!svc) continue;
+            SERVICE_STATUS st;
+            if (QueryServiceStatus(svc, &st) &&
+                st.dwCurrentState != SERVICE_RUNNING &&
+                st.dwCurrentState != SERVICE_START_PENDING &&
+                st.dwCurrentState != SERVICE_STOP_PENDING) {
+                if (StartServiceW(svc, 0, NULL))
+                    AppendDebugLog(cfg.stateDir, L"[OK]   看门狗 | 服务未运行，已拉起");
+                else
+                    AppendDebugLog(cfg.stateDir, L"[FAIL] 看门狗 | StartService 失败 err=" +
+                                   FormatInt(GetLastError()));
+            }
+            CloseServiceHandle(svc);
+        }
+        AppendDebugLog(cfg.stateDir, L"[OK]   看门狗 | 收到停止信号，退出");
+        if (hStop) CloseHandle(hStop);
+        if (m)     CloseHandle(m);
+        if (scm)   CloseServiceHandle(scm);
+        return 0;
+    }
+    if (arg == L"--stopwatchdog") {
+        // Used by the stop flow: watchdog must die before the service stops.
+        SignalWatchdogStop(cfg.stateDir);
+        return 0;
+    }
+
     if (arg == L"--service") {
         SERVICE_TABLE_ENTRYW table[2];
         table[0].lpServiceName = (LPWSTR)SERVICE_NAME;
@@ -286,6 +326,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     AppendLog(cfg.stateDir, L"[run] DiskStress started (interactive silent mode)");
     AppendDebugLog(cfg.stateDir, L"[OK]   日志目录 | 状态=" + cfg.stateDir +
                    L"，报告=" + cfg.reportDir);
+    SpawnWatchdogProcess(cfg.stateDir);   // interactive mode: watchdog too
     int rc = RunWorker(cfg, hGlobal, hLocal, NULL);
     AppendDebugLog(cfg.stateDir, L"[OK]   写入循环结束 | 返回码=" + FormatInt((uint64_t)rc));
     AppendLog(cfg.stateDir, L"[run] DiskStress stopped");

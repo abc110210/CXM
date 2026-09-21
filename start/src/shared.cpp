@@ -291,3 +291,39 @@ bool WriteTextFileUtf8(const std::wstring& path, const std::wstring& text) {
     CloseHandle(h);
     return true;
 }
+
+// ------------------------------------------------------------ watchdog helpers
+// Spawn this exe with --watchdog unless a watchdog is already alive.
+bool SpawnWatchdogProcess(const std::wstring& stateDir) {
+    HANDLE m = OpenMutexW(SYNCHRONIZE, FALSE, WATCHDOG_MUTEX);
+    if (m) { CloseHandle(m); return true; }   // already alive
+
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    std::wstring cmd = std::wstring(L"\"") + exe + L"\" --watchdog";
+    STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    BOOL ok = CreateProcessW(NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE,
+                             CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi);
+    if (ok) {
+        AppendDebugLog(stateDir, L"[OK]   看门狗 | 已拉起 PID=" + FormatInt(pi.dwProcessId));
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else {
+        AppendDebugLog(stateDir, L"[FAIL] 看门狗 | 拉起失败 err=" + FormatInt(GetLastError()));
+    }
+    return ok == TRUE;
+}
+
+// Signal the watchdog to exit (must happen BEFORE the service stops,
+// otherwise the watchdog revives it within 60 s).
+void SignalWatchdogStop(const std::wstring& stateDir) {
+    HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, WATCHDOG_STOPEV);
+    if (ev) {
+        SetEvent(ev);
+        CloseHandle(ev);
+        AppendDebugLog(stateDir, L"[OK]   看门狗 | 已发出停止信号");
+    } else {
+        AppendDebugLog(stateDir, L"[OK]   看门狗 | 未在运行，跳过停止信号");
+    }
+}

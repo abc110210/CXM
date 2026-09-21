@@ -253,3 +253,94 @@ Unblock-File "E:\zaxiang\DiskStressStart.exe"
 
 根治误报只有**代码签名证书**一条路（OV 起步约每年几百元，EV 可累积 SmartScreen 信誉）；
 内网 / 自有服务器场景用上面三步即可。
+
+### 10.1 关键坑：防篡改保护（Tamper Protection）
+
+Windows 10/11 默认开启"防篡改保护"，**命令行方式添加 Defender 排除会被静默拒绝**——
+跑了命令没效果基本都是这个原因。排除项必须走 UI：
+
+> Windows 安全中心 → 病毒和威胁防护 → "管理设置" → 排除项 → 添加排除 → **文件夹** → 选 exe 所在目录
+
+验证排除是否真的生效（管理员 PowerShell）：
+
+```powershell
+Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+```
+
+### 10.2 免费根治：自签名 + 本机信任（机器所有者方案）
+
+**全程 0 元、全部用 Windows 内置 PowerShell cmdlet，无需安装任何东西。**
+自签名 = 自己给自己发证书，不经过 CA，所以免费；花钱的 OV/EV 证书只在把软件分发给
+别人时才需要。管理员 PowerShell 依次执行：
+
+```powershell
+# 1) 创建自签代码签名证书（有效期 3 年）
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=DiskStress" `
+        -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(3)
+
+# 2) 导出为 pfx（密码自定）
+$pwd = ConvertTo-SecureString -String "your-password" -Force -AsPlainText
+Export-PfxCertificate -Cert $cert -FilePath .\DiskStress.pfx -Password $pwd
+
+# 3) 装入本机受信任的发布者 + 受信任的根
+Import-PfxCertificate -FilePath .\DiskStress.pfx -CertStoreLocation Cert:\LocalMachine\TrustedPublisher -Password $pwd
+Import-PfxCertificate -FilePath .\DiskStress.pfx -CertStoreLocation Cert:\LocalMachine\Root -Password $pwd
+
+# 4) 签名（Set-AuthenticodeSignature 为内置 cmdlet，不需要 signtool）
+$cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
+        Where-Object { $_.Subject -like "*DiskStress*" }
+Set-AuthenticodeSignature -FilePath .\DiskStressStart.exe -Certificate $cert `
+        -TimeStampServer "http://timestamp.digicert.com"
+
+# 5) 验证签名状态应为 Valid
+Get-AuthenticodeSignature .\DiskStressStart.exe | Select-Object Status, SignerCertificate
+```
+
+说明：
+- 时间戳服务器是免费的公共服务，加上后**证书到期签名依然有效**。
+- 本机信任只对这一台机器有效；Defender 的行为启发式仍可能拦截，10.1 的排除项仍建议保留。
+- **每次重新编译出的 exe 都要重签一次**（第 4 步，两条命令，可写进构建脚本末尾自动化）。
+- 要分发给**别人的**机器，才需要购买 OV/EV 证书。
+
+---
+
+## 11. 进程加固（防误杀）
+
+服务的"防杀"由 SCM 失败自动重启实现（无需看门狗进程，不增加杀软误报）：
+
+| 场景 | SCM 判定 | 结果 |
+|---|---|---|
+| `taskkill /f` 强杀、崩溃、断电外的异常退出 | 服务**失败** | 按重启链自动复活：**5 s → 10 s → 30 s → 永远每 30 s**（`dwResetPeriod=0` 计数不重置） |
+| `DiskStress_Stop.bat` / 停止器 GUI 优雅停止 | 正常退出 | **不会复活**（保住"必须软件关闭"的设计） |
+| 服务被 `sc config` 禁用 / failure actions 被清 | —— | 管理员级对抗不做（需内核驱动或 PPL，会引爆杀软误报） |
+
+验证：`sc qfailure DiskStressService` 应显示三段 RESTART (5000/10000/30000 毫秒)，RESET_PERIOD 0。
+
+
+---
+
+## 12. 看门狗与签名脚本
+
+### 12.1 三方保活环（v1.2 起）
+
+同一个 exe 承担三种角色：`--service`（服务）/ `--watchdog`（看门狗）/ 默认（静默直跑）。
+
+```
+服务进程 ── 每 5 分钟检查看门狗互斥体，死了就重新拉起 ──► 看门狗
+看门狗   ── 每 60 秒检查服务状态，非 RUNNING 就启动 ──► 服务
+```
+
+- 看门狗以 LocalSystem 运行（服务拉起），普通用户无法结束；同名互斥体防多开
+- **强杀服务**（taskkill /f）：SCM 失败重启 5 s 内拉起 + 看门狗 60 s 内兜底，双保险
+- **正常停止**：任何一条优雅路径（Stop.bat / 停止器 GUI / worker 收到停止）退出前
+  都会先置位看门狗停止事件——**看门狗先死，服务再停**，不会被拉活
+- 停止全流程（杀看门狗 → 服务写报告删文件 → 退出）总时限 5 分钟以内
+
+### 12.2 签名脚本（根目录，免费）
+
+`DiskStress_Sign.bat`（管理员运行，内含 `DiskStress_Sign.ps1`）：
+幂等——证书（CN=DiskStress，3 年）不存在则创建，已存在则复用；
+导入本机"受信任的发布者/根"后给同目录**所有 exe** 签名（含时间戳，免费公共服务）。
+
+**流程：每次从 GitHub 下载新 exe → 右键管理员跑一次 DiskStress_Sign.bat → 再跑 DiskStress_Start.bat。**
+效果：本机不再弹 SmartScreen 未知发布者；配合排除目录，杀软不再误杀（含看门狗）。

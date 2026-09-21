@@ -616,6 +616,7 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
     double nextSegmentSec = (double)cfg.segmentSec;
     double nextReportSec  = (double)cfg.reportIntervalSec;
     double nextHeartbeat  = 600.0;          // debug.log 每 10 分钟一条心跳
+    double nextWatchdog   = 300.0;          // 每 5 分钟唤醒一次看门狗（死了就重新拉起）
     Stats  prevSnap;
     bool   firstSnap   = true;
     bool   allocWarned = false;
@@ -706,6 +707,12 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
             nextReportSec += (double)cfg.reportIntervalSec;
         }
 
+        // 服务唤醒看门狗：每 5 分钟检查互斥体，不在就重新拉起
+        if (elapsed >= nextWatchdog) {
+            SpawnWatchdogProcess(cfg.stateDir);
+            nextWatchdog += 300.0;
+        }
+
         if (elapsed >= nextHeartbeat) {
             Stats hb;
             Snapshot(tcs, sc, accum, hb);
@@ -782,6 +789,8 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
 
     DeleteFileW((cfg.stateDir + L"\\" + PID_FILE).c_str());
     SetThreadExecutionState(ES_CONTINUOUS);
+    // 优雅退出前先送看门狗停止信号：否则看门狗 60 s 内会把服务拉活
+    SignalWatchdogStop(cfg.stateDir);
     Dbg(cfg.stateDir, L"退出", true, L"RunWorker 正常结束，返回码=0");
     return 0;
 }
