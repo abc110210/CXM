@@ -72,7 +72,7 @@ static void SrvLogResolve() {
     HANDLE hq = CreateFileA(g_logPathA, GENERIC_READ, FILE_SHARE_WRITE, NULL,
                             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hq == INVALID_HANDLE_VALUE) {
-        // exe 目录不可写（如 Program Files），退回 %TEMP%\DiskStress\
+        // exe 目录不可写（如 Program Files）时，退回系统 TEMP 下的 DiskStress 目录
         char tmp[MAX_PATH];
         if (GetTempPathA(MAX_PATH, tmp)) {
             strcpy(g_logPathA, tmp);
@@ -123,6 +123,11 @@ static void SrvLog(const char* tag, const char* fmt, ...) {
 }
 
 #define OFFLINE_AFTER  8000     // ms 无心跳判定离线
+
+// 前向声明：SEH 包装函数定义在真实函数之前，必须先声明否则 C3861
+static DWORD WINAPI SessionThread(LPVOID p);
+static DWORD WINAPI ListenThread(LPVOID p);
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
 // ------------------------------------------------------------ 调色板
 static const COLORREF C_BG       = RGB(15, 18, 25);
