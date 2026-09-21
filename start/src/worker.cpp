@@ -98,6 +98,7 @@ static void LiveUpdate(const Stats& snap, uint64_t uptimeSec) {
     }
     EnterCriticalSection(&g_liveLock);
     g_live.writes    = snap.writes;
+    g_live.bytes     = snap.bytes;
     g_live.errors    = snap.writeErrors + snap.syncErrors;
     g_live.iops      = iops;
     g_live.mbps      = mbps;

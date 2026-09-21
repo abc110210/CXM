@@ -58,6 +58,7 @@ void ApplyCfgLine(const std::string& lineIn, const std::wstring& stateDir) {
             ok = false;
         }
     }
+    if (ok && hasVal && fi < 5) f[fi++] = val;   // 修复：最后一个字段后没有分隔符，必须补 flush
     if (!ok || !hasVal || fi != 4) {
         AppendDebugLog(stateDir, L"[FAIL] 配置下发 | 无法解析: " +
                        std::wstring(line.begin(), line.end()));
@@ -82,6 +83,8 @@ void ApplyCfgLine(const std::string& lineIn, const std::wstring& stateDir) {
                  nv.threads, nv.queueDepth, nv.blockBytes, nv.iopsLimit,
                  (unsigned long long)RtGet(&g_rt).version);
         AppendDebugLog(stateDir, msg);
+    } else {
+        AppendDebugLog(stateDir, L"[OK]   配置下发 | 与当前配置相同，无需变更");
     }
 }
 
@@ -197,9 +200,10 @@ DWORD WINAPI NetThread(LPVOID p) {
                 prevTick   = now;
 
                 char line[512];
-                sprintf(line, "STATS|%.1f|%.2f|%llu|%llu|%llu|%u|%u|%u|%u\r\n",
+                sprintf(line, "STATS|%.1f|%.2f|%llu|%llu|%llu|%llu|%u|%u|%u|%u\r\n",
                         iops, ls.mbps,
                         (unsigned long long)ls.writes,
+                        (unsigned long long)ls.bytes,
                         (unsigned long long)ls.errors,
                         (unsigned long long)ls.uptimeSec,
                         ls.cfg.threads, ls.cfg.queueDepth, ls.cfg.blockBytes, ls.cfg.iopsLimit);

@@ -103,12 +103,13 @@ bool      RtApply(RuntimeCfg* c, const CfgVals& nv);  // 有变化时 version++ 
 // 供网络线程周期上报的实时状态
 struct LiveStats {
     uint64_t  writes;
+    uint64_t  bytes;
     uint64_t  errors;
     double    iops;
     double    mbps;
     uint64_t  uptimeSec;
     CfgVals   cfg;
-    LiveStats() : writes(0), errors(0), iops(0), mbps(0), uptimeSec(0) {}
+    LiveStats() : writes(0), bytes(0), errors(0), iops(0), mbps(0), uptimeSec(0) {}
 };
 
 typedef void (*LiveStatsFn)(LiveStats* out);

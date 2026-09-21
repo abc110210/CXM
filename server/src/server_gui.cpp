@@ -159,11 +159,15 @@ struct Client {
     double   iops, mbps;
     uint64_t writes, bytes, errors, uptime;
     CfgValsS cfg;
+    CfgValsS pend;         // 待确认的下发配置（收到 STATS 回传一致即确认）
+    uint64_t pendAt;
+    bool     hasPend;
     uint64_t lastSeen;
     bool     online;
 
     Client() : lockInit(false), sock(INVALID_SOCKET), pid(0), iops(0), mbps(0),
-               writes(0), bytes(0), errors(0), uptime(0), lastSeen(0), online(false) {}
+               writes(0), bytes(0), errors(0), uptime(0), pendAt(0), hasPend(false),
+               lastSeen(0), online(false) {}
 };
 
 static std::vector<Client*> g_clients;
@@ -358,7 +362,22 @@ static DWORD WINAPI SessionThread(LPVOID p) {
                     me->cfg.qd      = (uint32_t)atoi(f[8].c_str());
                     me->cfg.block   = (uint32_t)atoi(f[9].c_str());
                     me->cfg.iops    = (uint32_t)atoi(f[10].c_str());
+                    if (me->hasPend &&
+                        me->cfg.threads == me->pend.threads && me->cfg.qd == me->pend.qd &&
+                        me->cfg.block == me->pend.block && me->cfg.iops == me->pend.iops) {
+                        me->hasPend = false;
+                        SrvLog("[OK]   下发确认", "id=%s 客户端已生效: %u线程/%uQD/%uB/iops=%u",
+                               me->id.c_str(), me->cfg.threads, me->cfg.qd,
+                               me->cfg.block, me->cfg.iops);
+                    }
                 } else {                            // 旧格式兼容
+                    static uint64_t s_lastOldLog = 0;
+                    uint64_t nowT = GetTickCount64();
+                    if (nowT - s_lastOldLog >= 60000) {
+                        s_lastOldLog = nowT;
+                        SrvLog("[FAIL]", "客户端版本过旧(STATS 缺 bytes/cfg 字段): id=%s，GB 统计与配置回显不可用，请更新客户端",
+                               me->id.c_str());
+                    }
                     me->errors = _strtoui64(f[4].c_str(), NULL, 10);
                     me->uptime = _strtoui64(f[5].c_str(), NULL, 10);
                 }
@@ -391,6 +410,10 @@ static DWORD WINAPI SessionThread(LPVOID p) {
             me->sock = INVALID_SOCKET;
             me->online = false;              // 否则说明已被新连接顶替，保持在线状态
             SrvLog("[OK]   离线", "id=%s ip=%s", me->id.c_str(), ip.c_str());
+            if (me->hasPend) {
+                me->hasPend = false;
+                SrvLog("[FAIL]", "下发未确认: 设备已离线 id=%s", me->id.c_str());
+            }
         }
         LeaveCriticalSection(&me->lock);
     }
@@ -497,7 +520,12 @@ static void PushConfig(bool toAll) {
             sent++;
             EnterCriticalSection(&c->lock);
             c->cfg.threads = th; c->cfg.qd = qd; c->cfg.block = bl; c->cfg.iops = io;
+            c->pend.threads = th; c->pend.qd = qd; c->pend.block = bl; c->pend.iops = io;
+            c->pendAt  = GetTickCount64();
+            c->hasPend = true;
             LeaveCriticalSection(&c->lock);
+        } else {
+            SrvLog("[FAIL]", "下发发送失败(TCP 写入): id=%s", c->id.c_str());
         }
     }
     LeaveCriticalSection(&g_clientsLock);
@@ -607,9 +635,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SrvLog("[OK]   界面", "UI 创建完成，监听线程已启动");
         return 0;
     }
-    case WM_TIMER:
+    case WM_TIMER: {
+        uint64_t nowT = GetTickCount64();
+        EnterCriticalSection(&g_clientsLock);
+        for (size_t i = 0; i < g_clients.size(); i++) {
+            Client* c = g_clients[i];
+            EnterCriticalSection(&c->lock);
+            if (c->hasPend && nowT - c->pendAt > 30000) {
+                c->hasPend = false;
+                SrvLog("[FAIL]", "下发未确认(30s 无配置回执): id=%s，客户端可能未更新或已离线",
+                       c->id.c_str());
+            }
+            LeaveCriticalSection(&c->lock);
+        }
+        LeaveCriticalSection(&g_clientsLock);
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
+    }
     case WM_COMMAND:
         if (HIWORD(wp) == BN_CLICKED) {
             if (LOWORD(wp) == 201) PushConfig(false);
