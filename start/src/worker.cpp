@@ -471,6 +471,9 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
             (sizeOk ? L"" : (L" 失败 err=" + FormatInt(GetLastError()))));
     }
 
+    // --- 恢复持久化的下发配置（电脑重启后继续生效） ---
+    LoadPersistedOverrides(cfg);
+
     // --- 预填充：之后所有写入都是覆盖已有数据 ---
     Stats accum;      // 跨代累计基线（重建线程池时不清零）
     if (cfg.prefill) {
@@ -496,11 +499,11 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
         init.threads    = cfg.threads;
         init.queueDepth = cfg.queueDepth;
         init.blockBytes = (uint32_t)cfg.blockBytes;
-        init.iopsLimit  = 0;
+        init.iopsLimit  = cfg.iopsLimit;
         init.version    = 1;
         RtInit(&g_rt, init);
         LiveInit();
-        LimiterSetRate(0);
+        LimiterSetRate(cfg.iopsLimit);
     }
 
     // --- 线程池（可整代重建）---
@@ -514,7 +517,7 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
     applied.threads    = cfg.threads;
     applied.queueDepth = cfg.queueDepth;
     applied.blockBytes = (uint32_t)cfg.blockBytes;
-    applied.iopsLimit  = 0;
+    applied.iopsLimit  = cfg.iopsLimit;
     applied.version    = 1;
 
     uint64_t blocks = cfg.workingSetBytes / cfg.blockBytes;
@@ -623,7 +626,7 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
 
     // 在线模式：连接服务器、上报状态、接收配置下发
     HANDLE hWorkerStop = CreateEventW(NULL, TRUE, FALSE, NULL);
-    if (hWorkerStop) NetStartThread(hWorkerStop, LiveStatsProvider, cfg.stateDir);
+    if (hWorkerStop) NetStartThread(hWorkerStop, LiveStatsProvider, cfg.stateDir, cfg.filePath);
 
     while (poolReady) {
         bool stopReq = false;

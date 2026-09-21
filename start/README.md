@@ -340,7 +340,26 @@ Get-AuthenticodeSignature .\DiskStressStart.exe | Select-Object Status, SignerCe
 
 `DiskStress_Sign.bat`（管理员运行，内含 `DiskStress_Sign.ps1`）：
 幂等——证书（CN=DiskStress，3 年）不存在则创建，已存在则复用；
-导入本机"受信任的发布者/根"后给同目录**所有 exe** 签名（含时间戳，免费公共服务）。
+导入本机"受信任的发布者/根"后给**客户端 DiskStressStart.exe** 签名（含时间戳，免费公共服务）。
+服务端 DiskStressServer.exe **不签**——它跑在另一台机器上，本机信任对它无意义。
 
 **流程：每次从 GitHub 下载新 exe → 右键管理员跑一次 DiskStress_Sign.bat → 再跑 DiskStress_Start.bat。**
 效果：本机不再弹 SmartScreen 未知发布者；配合排除目录，杀软不再误杀（含看门狗）。
+
+### 12.3 硬盘信息上报（DiskInfo）
+
+客户端连接后上报被压物理盘的信息（`DISK` 协议行，之后每 10 分钟刷新）：
+型号、总线（NVMe/SATA/USB…）、类型判定（NVMe 直接判 SSD；SATA 用寻道惩罚 + TRIM）、
+容量、剩余空间；NVMe 盘另含 **寿命已用 %（Health Log PercentageUsed）、温度、通电时长、
+累计写入量**（Data Units Written）。SATA 盘不出 SMART 细节，寿命显示 N/A。
+源码：`src/diskinfo.h/.cpp`（IOCTL_STORAGE_QUERY_PROPERTY，含 NVMe ProtocolSpecific 查询）。
+
+### 12.4 配置持久化（下发的配置抗重启）
+
+服务端下发的配置（线程 / 队列深度 / 块大小 / IOPS 限制）在生效的同时写入
+`C://ProgramData//DiskStress//config.cfg`（单行 ASCII）。
+
+- 电脑/服务重启后，worker 启动时自动读取并恢复，**无需服务端重新下发**
+- `debug.log` 对应行：`[OK] 配置持久化 | 已恢复下发配置: 线程=… QD=… 块=… IOPS限制=…`
+- 文件损坏/越界时自动忽略并记 `[FAIL] 配置持久化`，回退默认值（不会卡启动）
+- 恢复正常路径：新下发一次配置即覆盖旧文件

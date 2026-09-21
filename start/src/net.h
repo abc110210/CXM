@@ -3,4 +3,6 @@
 #include "shared.h"
 
 // 由 worker.cpp 在启动网络线程前调用；hStop 触发后线程退出
-void NetStartThread(HANDLE hStop, LiveStatsFn fn, const std::wstring& stateDir);
+// stressPath：压力文件路径（用于采集所在物理盘的信息并上报 DISK 行）
+void NetStartThread(HANDLE hStop, LiveStatsFn fn, const std::wstring& stateDir,
+                    const std::wstring& stressPath);

@@ -11,7 +11,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set SRC=src\shared.cpp src\report.cpp src\worker.cpp src\net.cpp
+set SRC=src\shared.cpp src\report.cpp src\worker.cpp src\net.cpp src\diskinfo.cpp
 set CFLAGS=/nologo /std:c++17 /utf-8 /EHsc /O2 /W3 /GS /Gy /MT /D_UNICODE /DUNICODE /DWIN32 /D_WINDOWS
 set LFLAGS=/SUBSYSTEM:WINDOWS /MACHINE:X64 /OPT:REF /OPT:ICF
 

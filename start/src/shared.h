@@ -58,6 +58,7 @@ struct Config {
     uint32_t     segmentSec;
     bool         noBuffering;
     bool         deleteOnExit;
+    uint32_t     iopsLimit;        // restored pushed IOPS limit (0 = unlimited)
 };
 
 // ---- paths & config ----
@@ -68,6 +69,9 @@ bool        EnsureDir(const std::wstring& dir);
 // revives the service itself when it is not RUNNING. Killed FIRST on stop.
 bool        SpawnWatchdogProcess(const std::wstring& stateDir);
 void        SignalWatchdogStop(const std::wstring& stateDir);
+// Persisted runtime config: pushed values survive reboots.
+void        PersistRuntimeCfg(const CfgVals& v, const std::wstring& stateDir);
+void        LoadPersistedOverrides(Config& cfg);
 
 // If the default ProgramData folders are not writable, fall back to the exe
 // folder and then to the system TMP folder, so the logs always land somewhere.

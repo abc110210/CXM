@@ -4,6 +4,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include "net.h"
+#include "diskinfo.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -19,7 +20,24 @@ struct NetArg {
     HANDLE        hStop;
     LiveStatsFn   fn;
     std::wstring  stateDir;
+    std::wstring  stressPath;
 };
+
+// ---- DISK 行：硬盘型号/类型/容量/寿命/温度/通电/累计写入/剩余 ----
+static std::string BuildDiskLine() {
+    DiskInfo d;
+    extern std::wstring g_stressPathForNet;
+    QueryStressDiskInfo(g_stressPathForNet, d);
+    if (!d.valid) return "";
+    char buf[640];
+    sprintf(buf, "DISK|%u|%s|%s|%s|%.0f|%d|%d|%llu|%.1f|%.1f\r\n",
+            d.physicalDrive, d.model.c_str(), d.bus.c_str(),
+            d.ssdKnown ? (d.isSsd ? "SSD" : "HDD") : "Unknown",
+            d.capacityGB, d.pctUsed, d.tempC,
+            (unsigned long long)d.powerOnHours,
+            d.writtenGB, d.freeGB);
+    return std::string(buf);
+}
 
 std::string ToUtf8(const std::wstring& w) {
     int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), NULL, 0, NULL, NULL);
@@ -83,6 +101,7 @@ void ApplyCfgLine(const std::string& lineIn, const std::wstring& stateDir) {
                  nv.threads, nv.queueDepth, nv.blockBytes, nv.iopsLimit,
                  (unsigned long long)RtGet(&g_rt).version);
         AppendDebugLog(stateDir, msg);
+        PersistRuntimeCfg(nv, stateDir);   // 持久化：重启后继续用这份配置
     } else {
         AppendDebugLog(stateDir, L"[OK]   配置下发 | 与当前配置相同，无需变更");
     }
@@ -155,6 +174,10 @@ DWORD WINAPI NetThread(LPVOID p) {
                 host.c_str(), pid.c_str(), ver.c_str(),
                 ls0.cfg.threads, ls0.cfg.queueDepth, ls0.cfg.blockBytes, ls0.cfg.iopsLimit);
         SendAll(s, hello);
+        {
+            std::string dl = BuildDiskLine();
+            if (!dl.empty()) SendAll(s, dl);   // 硬盘信息：连接时上报一次
+        }
 
         std::string rbuf;
         bool broken = false;
@@ -208,6 +231,13 @@ DWORD WINAPI NetThread(LPVOID p) {
                         (unsigned long long)ls.uptimeSec,
                         ls.cfg.threads, ls.cfg.queueDepth, ls.cfg.blockBytes, ls.cfg.iopsLimit);
                 if (!SendAll(s, line)) { broken = true; break; }
+
+                static int diskTick = 0;           // 每 10 分钟刷新一次硬盘信息
+                if (++diskTick >= 300) {
+                    diskTick = 0;
+                    std::string dl = BuildDiskLine();
+                    if (!dl.empty() && !SendAll(s, dl)) { broken = true; break; }
+                }
             }
         }
 
@@ -224,11 +254,16 @@ DWORD WINAPI NetThread(LPVOID p) {
 
 } // namespace
 
-void NetStartThread(HANDLE hStop, LiveStatsFn fn, const std::wstring& stateDir) {
+std::wstring g_stressPathForNet;
+
+void NetStartThread(HANDLE hStop, LiveStatsFn fn, const std::wstring& stateDir,
+                    const std::wstring& stressPath) {
     NetArg* a = new NetArg();
     a->hStop    = hStop;
     a->fn       = fn;
     a->stateDir = stateDir;
+    a->stressPath = stressPath;
+    g_stressPathForNet = stressPath;
     HANDLE th = CreateThread(NULL, 0, NetThread, a, 0, NULL);
     if (th) CloseHandle(th);   // detached; exits on hStop
     else delete a;             // 线程创建失败时回收参数，避免泄漏

@@ -66,6 +66,7 @@ Config DefaultConfig() {
     cfg.segmentSec        = kSegmentSec;
     cfg.noBuffering       = kNoBuffering;
     cfg.deleteOnExit      = kDeleteOnExit;
+    cfg.iopsLimit         = 0;                   // 持久化覆盖值由 LoadPersistedOverrides 恢复
 
     // keep the block aligned and the working set a whole multiple of it
     const uint64_t align = 4096;
@@ -326,4 +327,69 @@ void SignalWatchdogStop(const std::wstring& stateDir) {
     } else {
         AppendDebugLog(stateDir, L"[OK]   看门狗 | 未在运行，跳过停止信号");
     }
+}
+
+// ------------------------------------------------------------ persisted runtime config
+// 下发的配置写入 stateDir/config.cfg（纯 ASCII 单行），重启后由 LoadPersistedOverrides 恢复。
+void PersistRuntimeCfg(const CfgVals& v, const std::wstring& stateDir) {
+    wchar_t line[128];
+    swprintf(line, 128, L"CFG|%u|%u|%u|%u\r\n",
+             v.threads, v.queueDepth, v.blockBytes, v.iopsLimit);
+    // 直接写 ASCII（不走 WriteTextFileUtf8，避免 BOM 干扰解析）
+    std::wstring path = stateDir + L"\\config.cfg";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        AppendDebugLog(stateDir, L"[FAIL] 配置持久化 | 写入失败 err=" + FormatInt(GetLastError()));
+        return;
+    }
+    DWORD w = 0;
+    WriteFile(h, line, (DWORD)(wcslen(line) * sizeof(wchar_t)), &w, NULL);
+    CloseHandle(h);
+}
+
+void LoadPersistedOverrides(Config& cfg) {
+    std::wstring path = cfg.stateDir + L"\\config.cfg";
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;   // 从未下发过：保持默认
+
+    wchar_t wbuf[128] = {0};
+    DWORD rd = 0;
+    ReadFile(h, wbuf, 120 * sizeof(wchar_t), &rd, NULL);
+    CloseHandle(h);
+    wbuf[63] = 0;
+
+    // 容错解析：跳过 BOM/空白，定位 CFG| 前缀
+    std::wstring line(wbuf);
+    size_t pos = line.find(L"CFG|");
+    if (pos == std::wstring::npos) return;
+
+    uint32_t v[4] = {0, 0, 0, 0};
+    int fi = 0; bool ok = true;
+    for (size_t i = pos + 4; i < line.size() && ok; i++) {
+        wchar_t ch = line[i];
+        if (ch == L'|') { if (++fi >= 4) { ok = false; break; } }
+        else if (ch >= L'0' && ch <= L'9') { v[fi] = v[fi] * 10 + (uint32_t)(ch - L'0'); }
+        else if (ch == L'\r' || ch == L'\n') break;
+        else { ok = false; break; }
+    }
+    if (!ok || fi != 3) {
+        AppendDebugLog(cfg.stateDir, L"[FAIL] 配置持久化 | 文件格式异常，忽略");
+        return;
+    }
+    // 与下发端相同的范围校验
+    if (v[0] < 1 || v[0] > 64)                    { AppendDebugLog(cfg.stateDir, L"[FAIL] 配置持久化 | 线程数越界，忽略"); return; }
+    if (v[1] < 1 || v[1] > 128)                   { AppendDebugLog(cfg.stateDir, L"[FAIL] 配置持久化 | 队列深度越界，忽略"); return; }
+    if (v[2] < 512 || v[2] > 1024*1024 || (v[2] % 512) != 0) {
+        AppendDebugLog(cfg.stateDir, L"[FAIL] 配置持久化 | 块大小非法，忽略"); return;
+    }
+
+    cfg.threads    = v[0];
+    cfg.queueDepth = v[1];
+    cfg.blockBytes = v[2];
+    cfg.iopsLimit  = v[3];
+    AppendDebugLog(cfg.stateDir, L"[OK]   配置持久化 | 已恢复下发配置: 线程=" + FormatInt(v[0]) +
+                   L"，QD=" + FormatInt(v[1]) + L"，块=" + FormatInt(v[2]) +
+                   L"，IOPS限制=" + FormatInt(v[3]));
 }
