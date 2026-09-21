@@ -152,6 +152,15 @@ static DWORD WINAPI SessionThread(LPVOID p) {
         }
         if (f.size() < 4) { delete a; return 0; }
 
+        EnterCriticalSection(&me->lock);
+        if (f.size() >= 8) {                    // HELLO 携带客户端当前配置
+            me->cfg.threads = (uint32_t)atoi(f[4].c_str());
+            me->cfg.qd      = (uint32_t)atoi(f[5].c_str());
+            me->cfg.block   = (uint32_t)atoi(f[6].c_str());
+            me->cfg.iops    = (uint32_t)atoi(f[7].c_str());
+        }
+        LeaveCriticalSection(&me->lock);
+
         ClientsInit();
         EnterCriticalSection(&g_clientsLock);
         me = FindById(f[1]);
@@ -208,6 +217,12 @@ static DWORD WINAPI SessionThread(LPVOID p) {
                 me->writes  = _strtoui64(f[3].c_str(), NULL, 10);
                 me->errors  = _strtoui64(f[4].c_str(), NULL, 10);
                 me->uptime  = _strtoui64(f[5].c_str(), NULL, 10);
+                if (f.size() >= 10) {               // STATS 携带客户端当前配置
+                    me->cfg.threads = (uint32_t)atoi(f[6].c_str());
+                    me->cfg.qd      = (uint32_t)atoi(f[7].c_str());
+                    me->cfg.block   = (uint32_t)atoi(f[8].c_str());
+                    me->cfg.iops    = (uint32_t)atoi(f[9].c_str());
+                }
                 me->lastSeen = GetTickCount64();
                 me->online  = true;
                 LeaveCriticalSection(&me->lock);

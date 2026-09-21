@@ -145,7 +145,13 @@ DWORD WINAPI NetThread(LPVOID p) {
         wasConnected = true;
 
         // u_long mode = 0; ioctlsocket(s, FIONBIO, &mode); // blocking
-        SendAll(s, "HELLO|" + host + "|" + pid + "|" + ver + "\r\n");
+        LiveStats ls0;
+        a->fn(&ls0);
+        char hello[512];
+        sprintf(hello, "HELLO|%s|%s|%s|%u|%u|%u|%u\r\n",
+                host.c_str(), pid.c_str(), ver.c_str(),
+                ls0.cfg.threads, ls0.cfg.queueDepth, ls0.cfg.blockBytes, ls0.cfg.iopsLimit);
+        SendAll(s, hello);
 
         std::string rbuf;
         bool broken = false;
@@ -191,11 +197,12 @@ DWORD WINAPI NetThread(LPVOID p) {
                 prevTick   = now;
 
                 char line[512];
-                sprintf(line, "STATS|%.1f|%.2f|%llu|%llu|%llu\r\n",
+                sprintf(line, "STATS|%.1f|%.2f|%llu|%llu|%llu|%u|%u|%u|%u\r\n",
                         iops, ls.mbps,
                         (unsigned long long)ls.writes,
                         (unsigned long long)ls.errors,
-                        (unsigned long long)ls.uptimeSec);
+                        (unsigned long long)ls.uptimeSec,
+                        ls.cfg.threads, ls.cfg.queueDepth, ls.cfg.blockBytes, ls.cfg.iopsLimit);
                 if (!SendAll(s, line)) { broken = true; break; }
             }
         }

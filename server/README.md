@@ -37,9 +37,11 @@ build_server.bat
 
 | 方向 | 格式 |
 |---|---|
-| 客户端 → 服务端 | `HELLO\|hostname\|pid\|version` |
-| 客户端 → 服务端 | `STATS\|iops\|mbps\|writes\|errors\|uptime`（每 2 秒） |
+| 客户端 → 服务端 | `HELLO\|hostname\|pid\|version\|threads\|qd\|block\|iopsLimit` |
+| 客户端 → 服务端 | `STATS\|iops\|mbps\|writes\|errors\|uptime\|threads\|qd\|block\|iopsLimit`（每 2 秒，后 4 项为客户端当前配置） |
 | 服务端 → 客户端 | `CFG\|threads\|qd\|block\|iopsLimit` |
+
+服务端的"当前配置"显示直接来自客户端上报——未下发过也能看到客户端的真实参数。
 
 客户端在 `start/src/shared.h` 里改 `kServerIP` 后重新编译即指向你的服务器。
 
