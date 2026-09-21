@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <windowsx.h>
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -26,6 +27,101 @@
 #pragma comment(lib, "gdi32.lib")
 
 #define DS_PORT        5757
+
+// ---------------- SEH 崩溃捕获：闪退时留下 server_crash.log ----------------
+static void WriteCrashLogA(const char* where, DWORD code, void* addr) {
+    char path[MAX_PATH] = {0};
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    char* slash = strrchr(path, '\\');
+    if (slash) *(slash + 1) = 0; else path[0] = 0;
+    strcat(path, "server_crash.log");
+
+    HANDLE h = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char buf[512];
+    int n = sprintf(buf,
+        "[%04u-%02u-%02u %02u:%02u:%02u] CRASH in %s: code=0x%08X addr=%p\r\n",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+        where, code, addr);
+    DWORD w = 0;
+    if (n > 0) WriteFile(h, buf, (DWORD)n, &w, NULL);
+    CloseHandle(h);
+}
+
+static LONG WINAPI SehFilter(const char* where, EXCEPTION_POINTERS* ep) {
+    WriteCrashLogA(where, ep ? ep->ExceptionRecord->ExceptionCode : 0,
+                   ep ? ep->ExceptionRecord->ExceptionAddress : NULL);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// ---------------- server_debug.log：运行诊断日志 ----------------
+// 与客户端 debug.log 同风格：时间戳 + [OK]/[FAIL] + 内容；超 5 MiB 轮转为 .old
+static char g_logPathA[MAX_PATH] = {0};
+
+static void SrvLogResolve() {
+    GetModuleFileNameA(NULL, g_logPathA, MAX_PATH);
+    char* slash = strrchr(g_logPathA, '\\');
+    if (slash) *(slash + 1) = 0; else g_logPathA[0] = 0;
+    strcat(g_logPathA, "server_debug.log");
+
+    // 探测 exe 目录可写 + 大小轮转
+    LARGE_INTEGER sz; sz.QuadPart = 0;
+    HANDLE hq = CreateFileA(g_logPathA, GENERIC_READ, FILE_SHARE_WRITE, NULL,
+                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hq == INVALID_HANDLE_VALUE) {
+        // exe 目录不可写（如 Program Files），退回 %TEMP%\DiskStress\
+        char tmp[MAX_PATH];
+        if (GetTempPathA(MAX_PATH, tmp)) {
+            strcpy(g_logPathA, tmp);
+            strcat(g_logPathA, "DiskStress");
+            CreateDirectoryA(g_logPathA, NULL);
+            strcat(g_logPathA, "\\server_debug.log");
+        } else {
+            g_logPathA[0] = 0;
+            return;
+        }
+    } else {
+        GetFileSizeEx(hq, &sz);
+        CloseHandle(hq);
+        if (sz.QuadPart > 5 * 1024 * 1024) {
+            char oldp[MAX_PATH];
+            strcpy(oldp, g_logPathA);
+            strcat(oldp, ".old");
+            DeleteFileA(oldp);
+            MoveFileA(g_logPathA, oldp);
+        }
+    }
+}
+
+static void SrvLog(const char* tag, const char* fmt, ...) {
+    if (!g_logPathA[0]) return;
+
+    char msg[600];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg) - 1, fmt, ap);
+    va_end(ap);
+    msg[sizeof(msg) - 1] = 0;
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char out[800];
+    int n = sprintf(out, "[%04u-%02u-%02u %02u:%02u:%02u.%03u] %s %s\r\n",
+                    st.wYear, st.wMonth, st.wDay,
+                    st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+                    tag, msg);
+
+    HANDLE h = CreateFileA(g_logPathA, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    if (n > 0) WriteFile(h, out, (DWORD)n, &w, NULL);
+    CloseHandle(h);
+}
+
 #define OFFLINE_AFTER  8000     // ms 无心跳判定离线
 
 // ------------------------------------------------------------ 调色板
@@ -56,13 +152,13 @@ struct Client {
     uint32_t pid;
     std::string ver;
     double   iops, mbps;
-    uint64_t writes, errors, uptime;
+    uint64_t writes, bytes, errors, uptime;
     CfgValsS cfg;
     uint64_t lastSeen;
     bool     online;
 
     Client() : lockInit(false), sock(INVALID_SOCKET), pid(0), iops(0), mbps(0),
-               writes(0), errors(0), uptime(0), lastSeen(0), online(false) {}
+               writes(0), bytes(0), errors(0), uptime(0), lastSeen(0), online(false) {}
 };
 
 static std::vector<Client*> g_clients;
@@ -116,6 +212,12 @@ static bool SendLine(Client* c, const std::string& line) {
 
 struct SessArg { SOCKET sock; std::string ip; };
 
+static DWORD WINAPI SessionThreadSEH(LPVOID p) {
+    __try { return SessionThread(p); }
+    __except (SehFilter("SessionThread", GetExceptionInformation())) { ExitProcess(2); }
+    return 1;
+}
+
 static DWORD WINAPI SessionThread(LPVOID p) {
     SessArg* a = (SessArg*)p;
     SOCKET s = a->sock;
@@ -132,15 +234,24 @@ static DWORD WINAPI SessionThread(LPVOID p) {
         if (r <= 0) continue;
         char buf[2048];
         int n = recv(s, buf, sizeof(buf), 0);
-        if (n <= 0) { delete a; return 0; }
+        if (n <= 0) {
+            SrvLog("[FAIL]", "握手前断开: %s (recv=%d err=%d)", ip.c_str(), n, WSAGetLastError());
+            delete a; return 0;
+        }
         rbuf.append(buf, n);
-        if (rbuf.size() > 1024 * 1024) { delete a; return 0; }   // 无换行超 1 MiB 视为异常连接
+        if (rbuf.size() > 1024 * 1024) {
+            SrvLog("[FAIL]", "异常连接(1MiB内无换行): %s，已断开", ip.c_str());
+            delete a; return 0;
+        }
         size_t pos = rbuf.find('\n');
         if (pos == std::string::npos) continue;
         std::string line = rbuf.substr(0, pos);
         rbuf.erase(0, pos + 1);
         if (!line.empty() && line.back() == '\r') line.pop_back();   // 兼容 \r\n
-        if (line.rfind("HELLO|", 0) != 0) { delete a; return 0; }
+        if (line.rfind("HELLO|", 0) != 0) {
+            SrvLog("[FAIL]", "首行不是 HELLO: %s 内容: %.60s", ip.c_str(), line.c_str());
+            delete a; return 0;
+        }
 
         std::vector<std::string> f;
         size_t st = 0;
@@ -150,8 +261,24 @@ static DWORD WINAPI SessionThread(LPVOID p) {
             f.push_back(line.substr(st, nx - st));
             st = nx + 1;
         }
-        if (f.size() < 4) { delete a; return 0; }
+        if (f.size() < 4) {
+            SrvLog("[FAIL]", "HELLO 字段不足(%zu): %s", f.size(), ip.c_str());
+            delete a; return 0;
+        }
 
+        // 注意：必须先注册拿到 me，才能碰 me->lock（旧代码在此处对 NULL me 加锁，是闪退根源）
+        ClientsInit();
+        EnterCriticalSection(&g_clientsLock);
+        bool existed = false;
+        me = FindById(f[1]);
+        if (!me) {
+            me = new Client();
+            InitializeCriticalSection(&me->lock);
+            me->id = f[1];
+            g_clients.push_back(me);
+        } else {
+            existed = true;
+        }
         EnterCriticalSection(&me->lock);
         if (f.size() >= 8) {                    // HELLO 携带客户端当前配置
             me->cfg.threads = (uint32_t)atoi(f[4].c_str());
@@ -159,18 +286,6 @@ static DWORD WINAPI SessionThread(LPVOID p) {
             me->cfg.block   = (uint32_t)atoi(f[6].c_str());
             me->cfg.iops    = (uint32_t)atoi(f[7].c_str());
         }
-        LeaveCriticalSection(&me->lock);
-
-        ClientsInit();
-        EnterCriticalSection(&g_clientsLock);
-        me = FindById(f[1]);
-        if (!me) {
-            me = new Client();
-            InitializeCriticalSection(&me->lock);
-            me->id = f[1];
-            g_clients.push_back(me);
-        }
-        EnterCriticalSection(&me->lock);
         if (me->sock != INVALID_SOCKET && me->sock != s) closesocket(me->sock);
         me->sock = s;
         me->ip = ip;
@@ -178,13 +293,21 @@ static DWORD WINAPI SessionThread(LPVOID p) {
         me->ver = f[3];
         me->online = true;
         me->lastSeen = GetTickCount64();
+        SrvLog(existed ? "[OK]   重连" : "[OK]   新设备",
+               "id=%s pid=%u ver=%s cfg=%u线程/%uQD/%uB/iops=%u 来源=%s%s",
+               me->id.c_str(), me->pid, me->ver.c_str(),
+               me->cfg.threads, me->cfg.qd, me->cfg.block, me->cfg.iops, ip.c_str(),
+               existed ? "（顶替旧连接）" : "");
         LeaveCriticalSection(&me->lock);
         LeaveCriticalSection(&g_clientsLock);
         registered = true;
         InvalidateRect(g_hwnd, NULL, FALSE);
         break;
     }
-    if (!registered) { closesocket(s); delete a; return 0; }
+    if (!registered) {
+        SrvLog("[FAIL]", "握手超时(5s 内无 HELLO): %s，关闭", ip.c_str());
+        closesocket(s); delete a; return 0;
+    }
 
     while (true) {
         fd_set rs; FD_ZERO(&rs); FD_SET(s, &rs);
@@ -193,9 +316,16 @@ static DWORD WINAPI SessionThread(LPVOID p) {
         if (r > 0) {
             char buf[4096];
             int n = recv(s, buf, sizeof(buf), 0);
-            if (n <= 0) break;
+            if (n <= 0) {
+                SrvLog("[FAIL]", "连接断开: id=%s (recv=%d err=%d)",
+                       me ? me->id.c_str() : ip.c_str(), n, WSAGetLastError());
+                break;
+            }
             rbuf.append(buf, n);
-            if (rbuf.size() > 1024 * 1024) break;   // 防止无换行数据撑爆内存
+            if (rbuf.size() > 1024 * 1024) {
+                SrvLog("[FAIL]", "异常数据(1MiB内无换行): id=%s，断开", me->id.c_str());
+                break;   // 防止无换行数据撑爆内存
+            }
             size_t pos;
             while ((pos = rbuf.find('\n')) != std::string::npos) {
                 std::string line = rbuf.substr(0, pos);
@@ -215,13 +345,17 @@ static DWORD WINAPI SessionThread(LPVOID p) {
                 me->iops    = atof(f[1].c_str());
                 me->mbps    = atof(f[2].c_str());
                 me->writes  = _strtoui64(f[3].c_str(), NULL, 10);
-                me->errors  = _strtoui64(f[4].c_str(), NULL, 10);
-                me->uptime  = _strtoui64(f[5].c_str(), NULL, 10);
-                if (f.size() >= 10) {               // STATS 携带客户端当前配置
-                    me->cfg.threads = (uint32_t)atoi(f[6].c_str());
-                    me->cfg.qd      = (uint32_t)atoi(f[7].c_str());
-                    me->cfg.block   = (uint32_t)atoi(f[8].c_str());
-                    me->cfg.iops    = (uint32_t)atoi(f[9].c_str());
+                if (f.size() >= 11) {               // 新格式: 含 bytes 与当前配置
+                    me->bytes  = _strtoui64(f[4].c_str(), NULL, 10);
+                    me->errors = _strtoui64(f[5].c_str(), NULL, 10);
+                    me->uptime = _strtoui64(f[6].c_str(), NULL, 10);
+                    me->cfg.threads = (uint32_t)atoi(f[7].c_str());
+                    me->cfg.qd      = (uint32_t)atoi(f[8].c_str());
+                    me->cfg.block   = (uint32_t)atoi(f[9].c_str());
+                    me->cfg.iops    = (uint32_t)atoi(f[10].c_str());
+                } else {                            // 旧格式兼容
+                    me->errors = _strtoui64(f[4].c_str(), NULL, 10);
+                    me->uptime = _strtoui64(f[5].c_str(), NULL, 10);
                 }
                 me->lastSeen = GetTickCount64();
                 me->online  = true;
@@ -229,13 +363,19 @@ static DWORD WINAPI SessionThread(LPVOID p) {
                 InvalidateRect(g_hwnd, NULL, FALSE);
             }
         } else if (r == SOCKET_ERROR) {
+            SrvLog("[FAIL]", "select 错误: id=%s err=%d",
+                   me ? me->id.c_str() : ip.c_str(), WSAGetLastError());
             break;
         }
         if (me) {
             EnterCriticalSection(&me->lock);
             bool alive = (GetTickCount64() - me->lastSeen) < OFFLINE_AFTER;
             LeaveCriticalSection(&me->lock);
-            if (!alive) break;
+            if (!alive) {
+                SrvLog("[FAIL]", "心跳超时(%d ms 无 STATS): id=%s，判定离线",
+                       OFFLINE_AFTER, me->id.c_str());
+                break;
+            }
         }
     }
 
@@ -245,6 +385,7 @@ static DWORD WINAPI SessionThread(LPVOID p) {
         if (me->sock == s) {                 // 只有自己仍是注册连接时才判离线
             me->sock = INVALID_SOCKET;
             me->online = false;              // 否则说明已被新连接顶替，保持在线状态
+            SrvLog("[OK]   离线", "id=%s ip=%s", me->id.c_str(), ip.c_str());
         }
         LeaveCriticalSection(&me->lock);
     }
@@ -253,12 +394,24 @@ static DWORD WINAPI SessionThread(LPVOID p) {
     return 0;
 }
 
+static DWORD WINAPI ListenThreadSEH(LPVOID p) {
+    __try { return ListenThread(p); }
+    __except (SehFilter("ListenThread", GetExceptionInformation())) { ExitProcess(2); }
+    return 1;
+}
+
 static DWORD WINAPI ListenThread(LPVOID) {
     WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        SrvLog("[FAIL]", "WSAStartup 失败 err=%d", WSAGetLastError());
+        return 1;
+    }
 
     SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (ls == INVALID_SOCKET) return 1;
+    if (ls == INVALID_SOCKET) {
+        SrvLog("[FAIL]", "socket 创建失败 err=%d", WSAGetLastError());
+        return 1;
+    }
     sockaddr_in sa;
     ZeroMemory(&sa, sizeof(sa));
     sa.sin_family = AF_INET;
@@ -267,10 +420,12 @@ static DWORD WINAPI ListenThread(LPVOID) {
     int yes = 1;
     setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
     if (bind(ls, (sockaddr*)&sa, sizeof(sa)) != 0 || listen(ls, 16) != 0) {
+        SrvLog("[FAIL]", "bind/listen 失败(端口 %d 被占用？) err=%d", DS_PORT, WSAGetLastError());
         swprintf(g_status, 256, L"监听失败（端口 %d 被占用？）err=%d", DS_PORT, WSAGetLastError());
         InvalidateRect(g_hwnd, NULL, FALSE);
         return 1;
     }
+    SrvLog("[OK]   监听", "0.0.0.0:%d", DS_PORT);
     swprintf(g_status, 256, L"监听中 0.0.0.0:%d", DS_PORT);
     InvalidateRect(g_hwnd, NULL, FALSE);
 
@@ -278,15 +433,19 @@ static DWORD WINAPI ListenThread(LPVOID) {
         sockaddr_in cli;
         int cl = sizeof(cli);
         SOCKET s = accept(ls, (sockaddr*)&cli, &cl);
-        if (s == INVALID_SOCKET) break;
+        if (s == INVALID_SOCKET) {
+            SrvLog("[FAIL]", "accept 失败 err=%d，监听线程退出", WSAGetLastError());
+            break;
+        }
         char ip[64];
         sprintf(ip, "%u.%u.%u.%u",
                 cli.sin_addr.S_un.S_un_b.s_b1, cli.sin_addr.S_un.S_un_b.s_b2,
                 cli.sin_addr.S_un.S_un_b.s_b3, cli.sin_addr.S_un.S_un_b.s_b4);
+        SrvLog("[OK]   接入", "tcp %s:%u", ip, (unsigned)ntohs(cli.sin_port));
         SessArg* a = new SessArg();
         a->sock = s;
         a->ip = ip;
-        CreateThread(NULL, 0, SessionThread, a, 0, NULL);
+        CreateThread(NULL, 0, SessionThreadSEH, a, 0, NULL);
     }
     return 0;
 }
@@ -338,6 +497,9 @@ static void PushConfig(bool toAll) {
     }
     LeaveCriticalSection(&g_clientsLock);
 
+    SrvLog("[OK]   下发", "CFG|%u|%u|%u|%u -> 在线 %d 台，成功 %d 台",
+           th, qd, bl, io, tried, sent);
+
     swprintf(g_status, 256, L"下发%s：成功 %d / 在线 %d，客户端生效后 2 秒内数据自动刷新",
              toAll ? L"全部在线" : L"选中设备", sent, tried);
     InvalidateRect(g_hwnd, NULL, FALSE);
@@ -376,6 +538,12 @@ static void DrawDot(HDC dc, int cx, int cy, int r, COLORREF c) {
     DeleteObject(p);
 }
 
+static std::wstring FormatInt(uint64_t v) {
+    wchar_t t[32];
+    swprintf(t, 32, L"%llu", (unsigned long long)v);
+    return std::wstring(t);
+}
+
 static std::wstring BlockToStr(uint32_t b) {
     wchar_t t[32];
     if (b >= 1024) swprintf(t, 32, L"%uK", b / 1024);
@@ -384,6 +552,12 @@ static std::wstring BlockToStr(uint32_t b) {
 }
 
 // ------------------------------------------------------------ 消息处理
+static LRESULT CALLBACK WndProcSEH(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    __try { return WndProc(hwnd, msg, wp, lp); }
+    __except (SehFilter("WndProc", GetExceptionInformation())) { ExitProcess(2); }
+    return 0;
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
@@ -424,7 +598,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(g_btnOne, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_btnAll, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SetTimer(hwnd, 1, 1000, NULL);
-        CreateThread(NULL, 0, ListenThread, NULL, 0, NULL);
+        CreateThread(NULL, 0, ListenThreadSEH, NULL, 0, NULL);
+        SrvLog("[OK]   界面", "UI 创建完成，监听线程已启动");
         return 0;
     }
     case WM_TIMER:
@@ -539,8 +714,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SelectObject(mem, dop);
             DeleteObject(dpen);
 
-            swprintf(tmp, 256, L"写入 %llu    错误 %llu    运行 %llu 分 %llu 秒",
-                     (unsigned long long)c->writes, (unsigned long long)c->errors,
+            double gb = (double)c->bytes / (1024.0 * 1024.0 * 1024.0);
+            swprintf(tmp, 256, L"总写入 %.2f GB (%s 次)   错误 %llu   运行 %llu 分 %llu 秒",
+                     gb, FormatInt(c->writes).c_str(),
+                     (unsigned long long)c->errors,
                      c->uptime / 60, c->uptime % 60);
             DrawTextAt(mem, tmp, card.left + 20, card.top + 68, g_fBody, C_TEXT);
 
@@ -615,6 +792,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
+        SrvLog("[OK]   退出", "server exiting");
         PostQuitMessage(0);
         return 0;
     }
@@ -622,11 +800,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
+    SrvLogResolve();
+    SrvLog("[OK]   启动", "DiskStress server starting, port=%d, log=%s", DS_PORT, g_logPathA);
     ClientsInit();
 
     WNDCLASSW wc;
     ZeroMemory(&wc, sizeof(wc));
-    wc.lpfnWndProc   = WndProc;
+    wc.lpfnWndProc   = WndProcSEH;
     wc.hInstance     = hInst;
     wc.lpszClassName = L"DiskStressServerWnd";
     wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);

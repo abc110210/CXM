@@ -38,10 +38,29 @@ build_server.bat
 | 方向 | 格式 |
 |---|---|
 | 客户端 → 服务端 | `HELLO\|hostname\|pid\|version\|threads\|qd\|block\|iopsLimit` |
-| 客户端 → 服务端 | `STATS\|iops\|mbps\|writes\|errors\|uptime\|threads\|qd\|block\|iopsLimit`（每 2 秒，后 4 项为客户端当前配置） |
+| 客户端 → 服务端 | `STATS\|iops\|mbps\|writes\|bytes\|errors\|uptime\|threads\|qd\|block\|iopsLimit`（每 2 秒，bytes 为累计写入字节，后 4 项为当前配置） |
 | 服务端 → 客户端 | `CFG\|threads\|qd\|block\|iopsLimit` |
 
-服务端的"当前配置"显示直接来自客户端上报——未下发过也能看到客户端的真实参数。
+服务端卡片的"当前配置"与"总写入 GB"都直接来自客户端上报——未下发过配置也能看到客户端的真实参数。
+
+## 运行日志（server_debug.log）
+
+服务端自带调试日志，与客户端 debug.log 同风格（时间戳 + [OK]/[FAIL]），用于排查服务端运行问题：
+
+| 位置 | 条件 |
+|---|---|
+| **exe 同目录** `server_debug.log` | 默认（目录可写时） |
+| `%TEMP%\DiskStress\server_debug.log` | exe 目录不可写时自动退回 |
+
+记录内容：启动/退出、端口监听成功或失败（含错误码）、客户端接入与断开、
+设备注册/重连（含上报的配置）、配置下发结果、心跳超时判离线、异常连接防护。
+超 5 MiB 自动轮转为 `server_debug.log.old`。正常情况每分钟不过几行，不会刷屏。
+
+## 崩溃诊断
+
+服务端内置 SEH 崩溃捕获：异常闪退时会在 exe 同目录写 `server_crash.log`
+（含时间、发生位置 WndProc/SessionThread/ListenThread、异常代码与地址）。
+把该文件内容发出来即可定位闪退原因。
 
 客户端在 `start/src/shared.h` 里改 `kServerIP` 后重新编译即指向你的服务器。
 
