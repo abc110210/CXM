@@ -225,3 +225,31 @@ start/src/
 - 停止事件同时创建 `Global\` 与会话内两个命名对象，非管理员的控制台也能发停止信号（服务不存在时的降级路径）。
 - 压力文件是消耗品，**不要**指向任何有用文件。
 - 非 NTFS 卷（exFAT 等）上真实占用可能超过 100% 覆盖预期，建议在 NTFS 上运行。
+
+---
+
+## 10. 杀毒软件误报与白名单
+
+本工具的行为特征（无窗口后台常驻、服务自启、绕过缓存随机写满磁盘、TCP 上报）会命中杀软启发式的
+"勒索软件 / 后门"画像，属**预期内误报**，不是感染。构建已内置 VERSIONINFO 版本信息降低误报率；
+如仍被拦截，按需选用：
+
+**① Defender 排除**（管理员 PowerShell，二选一或都加）：
+
+```powershell
+Add-MpPreference -ExclusionPath    "E:\zaxiang"
+Add-MpPreference -ExclusionProcess "DiskStressStart.exe"
+```
+
+**② 解除 SmartScreen 锁定**（GitHub 下载的 exe 自带 Zone 标记）：
+
+```powershell
+Unblock-File "E:\zaxiang\DiskStressStart.exe"
+```
+
+或右键文件 → 属性 → 勾选"解除锁定" → 确定。
+
+**③ 已被隔离时**：Windows 安全中心 → 病毒和威胁防护 → 保护历史记录 → 还原并允许。
+
+根治误报只有**代码签名证书**一条路（OV 起步约每年几百元，EV 可累积 SmartScreen 信誉）；
+内网 / 自有服务器场景用上面三步即可。

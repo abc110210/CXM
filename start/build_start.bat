@@ -17,8 +17,15 @@ set LFLAGS=/SUBSYSTEM:WINDOWS /MACHINE:X64 /OPT:REF /OPT:ICF
 
 if not exist out mkdir out
 
-echo [1/1] Building DiskStressStart.exe ...
-cl %CFLAGS% /Fo:out\ /Fd:out\start.pdb %SRC% src\main.cpp /link %LFLAGS% /OUT:out\DiskStressStart.exe
+echo [1/2] Compiling version resource ...
+rc.exe /nologo /fo out\app.res app.rc
+if errorlevel 1 (
+  echo [ERROR] rc.exe failed.
+  exit /b 1
+)
+
+echo [2/2] Building DiskStressStart.exe ...
+cl %CFLAGS% /Fo:out\ /Fd:out\start.pdb %SRC% src\main.cpp out\app.res /link %LFLAGS% /OUT:out\DiskStressStart.exe
 if errorlevel 1 (
   echo [ERROR] build failed
   exit /b 1
