@@ -38,6 +38,7 @@ static bool QueryProperty(HANDLE h, STORAGE_PROPERTY_ID id, void* out, DWORD out
 // NVMe Health Log：缓冲 = STORAGE_PROTOCOL_SPECIFIC_DATA + 512B
 static bool QueryNvmeHealth(HANDLE h, unsigned char* health512) {
     // 固定栈缓冲（不依赖 _alloca / malloc.h）
+    const DWORD headerSize = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
     unsigned char buf[sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) + 512];
     const DWORD bufLen = sizeof(buf);
     ZeroMemory(buf, bufLen);
@@ -126,7 +127,7 @@ bool QueryStressDiskInfo(const std::wstring& stressFilePath, DiskInfo& out) {
     // ---- 4) 描述符：型号 / 总线 / 容量 ----
     unsigned char descBuf[4096];
     ZeroMemory(descBuf, sizeof(descBuf));
-    if (QueryProperty(hd, StorageDeviceDescriptor, descBuf, sizeof(descBuf))) {
+    if (QueryProperty(hd, StorageDeviceProperty, descBuf, sizeof(descBuf))) {
         STORAGE_DEVICE_DESCRIPTOR* d = (STORAGE_DEVICE_DESCRIPTOR*)descBuf;
         out.model = ExtractModel(descBuf, sizeof(descBuf));
         switch (d->BusType) {
@@ -144,7 +145,9 @@ bool QueryStressDiskInfo(const std::wstring& stressFilePath, DiskInfo& out) {
     {
         DISK_GEOMETRY_EX geo;
         ZeroMemory(&geo, sizeof(geo));
-        if (QueryProperty(hd, StorageDeviceCapacityProperty, &geo, sizeof(geo))) {
+        DWORD gret = 0;
+        if (DeviceIoControl(hd, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0,
+                            &geo, sizeof(geo), &gret, NULL)) {
             out.capacityGB = (double)geo.DiskSize.QuadPart / (1024.0 * 1024.0 * 1024.0);
         }
     }

@@ -6,6 +6,8 @@
 #include "net.h"
 #include "diskinfo.h"
 
+std::wstring g_stressPathForNet;   // 压力文件路径（DISK 行采集用）
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -26,7 +28,6 @@ struct NetArg {
 // ---- DISK 行：硬盘型号/类型/容量/寿命/温度/通电/累计写入/剩余 ----
 static std::string BuildDiskLine() {
     DiskInfo d;
-    extern std::wstring g_stressPathForNet;
     QueryStressDiskInfo(g_stressPathForNet, d);
     if (!d.valid) return "";
     char buf[640];
@@ -253,8 +254,6 @@ DWORD WINAPI NetThread(LPVOID p) {
 }
 
 } // namespace
-
-std::wstring g_stressPathForNet;
 
 void NetStartThread(HANDLE hStop, LiveStatsFn fn, const std::wstring& stateDir,
                     const std::wstring& stressPath) {
