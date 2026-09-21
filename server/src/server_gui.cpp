@@ -870,7 +870,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 DrawTextAt(mem, big, card.right - isz.cx - 18, card.top + 10, g_fBig, C_ACCENT);
                 DrawTextAt(mem, L"IOPS", card.right - 54, card.top + 44, g_fSmall, C_SUB);
                 swprintf(tmp, 256, L"%.1f MiB/s", c->mbps);
-                DrawTextAt(mem, tmp, card.right - 112, card.top + 62, g_fSmall, C_SUB);
+                DrawTextAt(mem, tmp, card.right - 112, card.top + 90, g_fSmall, C_SUB);
             }
             LeaveCriticalSection(&c->lock);
         }
