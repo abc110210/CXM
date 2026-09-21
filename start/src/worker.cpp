@@ -614,6 +614,7 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
     const wchar_t* reason = REASON_STOPPED;
     double nextSegmentSec = (double)cfg.segmentSec;
     double nextReportSec  = (double)cfg.reportIntervalSec;
+    double nextHeartbeat  = 600.0;          // debug.log 每 10 分钟一条心跳
     Stats  prevSnap;
     bool   firstSnap   = true;
     bool   allocWarned = false;
@@ -702,6 +703,20 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
             Dbg(cfg.stateDir, L"周期报告", repOk, repOk ? out : L"写入失败");
             accum.segments.clear();
             nextReportSec += (double)cfg.reportIntervalSec;
+        }
+
+        if (elapsed >= nextHeartbeat) {
+            Stats hb;
+            Snapshot(tcs, sc, accum, hb);
+            hb.allocatedBytes = GetFileAllocatedBytes(hFile);
+            Dbg(cfg.stateDir, L"心跳", true,
+                L"累计写入=" + FormatInt(hb.writes) +
+                L"，累计字节=" + FormatBytes(hb.bytes) +
+                L"，实际占用=" + FormatBytes(hb.allocatedBytes) +
+                L"，IOPS=" + FormatDouble(hb.writes / (elapsed > 0 ? elapsed : 1.0), 1) +
+                L"，写错误=" + FormatInt(hb.writeErrors) +
+                L"，fsync 错误=" + FormatInt(hb.syncErrors));
+            nextHeartbeat += 600.0;
         }
 
         if (stopReq) { reason = REASON_STOPPED; break; }

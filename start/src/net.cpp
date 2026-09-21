@@ -38,8 +38,10 @@ bool SendAll(SOCKET s, const std::string& data) {
     return true;
 }
 
-void ApplyCfgLine(const std::string& line, const std::wstring& stateDir) {
+void ApplyCfgLine(const std::string& lineIn, const std::wstring& stateDir) {
     // CFG|threads|qd|block|iopsLimit
+    std::string line = lineIn;
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
     int f[5] = {0, 0, 0, 0, 0};
     int fi = 0, val = 0;
     bool hasVal = false, ok = true;
@@ -56,7 +58,11 @@ void ApplyCfgLine(const std::string& line, const std::wstring& stateDir) {
             ok = false;
         }
     }
-    if (!ok || !hasVal || fi != 4) return;
+    if (!ok || !hasVal || fi != 4) {
+        AppendDebugLog(stateDir, L"[FAIL] 配置下发 | 无法解析: " +
+                       std::wstring(line.begin(), line.end()));
+        return;
+    }
 
     CfgVals nv;
     nv.threads    = (uint32_t)f[0];
@@ -70,6 +76,7 @@ void ApplyCfgLine(const std::string& line, const std::wstring& stateDir) {
     if (nv.blockBytes < 512 || nv.blockBytes > 1024 * 1024 || (nv.blockBytes % 512) != 0) return;
 
     if (RtApply(&g_rt, nv)) {
+        // 生效细节由监督循环记录（配置生效/重建线程池）
         wchar_t msg[256];
         swprintf(msg, 256, L"[OK]   配置下发 | 线程=%u QD=%u 块=%u IOPS限制=%u (版本 %llu)",
                  nv.threads, nv.queueDepth, nv.blockBytes, nv.iopsLimit,

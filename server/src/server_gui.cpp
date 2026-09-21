@@ -361,6 +361,13 @@ static void DrawDot(HDC dc, int cx, int cy, int r, COLORREF c) {
     DeleteObject(p);
 }
 
+static std::wstring BlockToStr(uint32_t b) {
+    wchar_t t[32];
+    if (b >= 1024) swprintf(t, 32, L"%uK", b / 1024);
+    else swprintf(t, 32, L"%uB", b);
+    return std::wstring(t);
+}
+
 // ------------------------------------------------------------ 消息处理
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -418,10 +425,79 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         RECT rc; GetClientRect(hwnd, &rc);
         RECT pl = PanelLeft(rc);
-        int cardW = pl.right - pl.left - 24, cardH = 104;
-
+        int cardW = pl.right - pl.left - 24, cardH = 118;
+        int hidden = 0;
         EnterCriticalSection(&g_clientsLock);
-        int n = (int)g_clients.size();
+        for (int i = 0; i < (int)g_clients.size(); i++) {
+            Client* c = g_clients[i];
+            int cy = pl.top + 48 + i * (cardH + 12);
+            if (cy + cardH > pl.bottom - 8) { hidden++; continue; }
+            EnterCriticalSection(&c->lock);
+            RECT card = {pl.left + 12, cy, pl.left + 12 + cardW, cy + cardH};
+            bool sel = (i == g_selected);
+            FillRound(mem, card, 10, sel ? C_CARD_SEL : C_CARD, sel ? C_ACCENT : C_BORDER);
+
+            DrawDot(mem, card.left + 20, card.top + 22, 6, c->online ? C_GREEN : C_OFFLINE);
+            wchar_t hostW[128];
+            MultiByteToWideChar(CP_UTF8, 0, c->id.c_str(), -1, hostW, 128);
+            DrawTextAt(mem, hostW, card.left + 34, card.top + 10, g_fCard,
+                       c->online ? C_TEXT : C_OFFLINE);
+
+            wchar_t ipw[64], verw[32];
+            MultiByteToWideChar(CP_UTF8, 0, c->ip.c_str(), -1, ipw, 64);
+            MultiByteToWideChar(CP_UTF8, 0, c->ver.c_str(), -1, verw, 32);
+            swprintf(tmp, 256, L"%s    PID %u    v%s    %s", ipw, c->pid, verw,
+                     c->online ? L"在线" : L"离线");
+            DrawTextAt(mem, tmp, card.left + 34, card.top + 36, g_fBody, C_SUB);
+
+            HPEN dpen = CreatePen(PS_SOLID, 1, C_BORDER);
+            HPEN dop = (HPEN)SelectObject(mem, dpen);
+            MoveToEx(mem, card.left + 16, card.top + 60, NULL);
+            LineTo(mem, card.right - 16, card.top + 60);
+            SelectObject(mem, dop);
+            DeleteObject(dpen);
+
+            swprintf(tmp, 256, L"写入 %llu    错误 %llu    运行 %llu 分 %llu 秒",
+                     (unsigned long long)c->writes, (unsigned long long)c->errors,
+                     c->uptime / 60, c->uptime % 60);
+            DrawTextAt(mem, tmp, card.left + 20, card.top + 68, g_fBody, C_TEXT);
+
+            {
+                std::vector<std::wstring> chips;
+                chips.push_back(L"线程 " + std::to_wstring(c->cfg.threads));
+                chips.push_back(L"QD " + std::to_wstring(c->cfg.qd));
+                chips.push_back(L"块 " + BlockToStr(c->cfg.block));
+                chips.push_back(c->cfg.iops == 0 ? std::wstring(L"IOPS 不限")
+                                                 : (L"IOPS ≤ " + std::to_wstring(c->cfg.iops)));
+                int cx = card.left + 20;
+                for (size_t k = 0; k < chips.size(); k++) {
+                    DrawTextAt(mem, chips[k].c_str(), cx, card.top + 94, g_fBody, C_TEXT);
+                    SIZE csz;
+                    HFONT ofc = (HFONT)SelectObject(mem, g_fBody);
+                    GetTextExtentPoint32W(mem, chips[k].c_str(), (int)chips[k].size(), &csz);
+                    SelectObject(mem, ofc);
+                    cx += csz.cx + 8;
+                    if (k + 1 < chips.size() && cx + 12 < card.right - 16) {
+                        DrawTextAt(mem, L"|", cx, card.top + 94, g_fBody, C_BORDER);
+                        cx += 16;
+                    }
+                }
+            }
+
+            if (c->online) {
+                wchar_t big[64];
+                if (c->iops >= 1000) swprintf(big, 64, L"%.1fK", c->iops / 1000.0);
+                else swprintf(big, 64, L"%.0f", c->iops);
+                HFONT ofb = (HFONT)SelectObject(mem, g_fBig);
+                SIZE isz; GetTextExtentPoint32W(mem, big, (int)wcslen(big), &isz);
+                SelectObject(mem, ofb);
+                DrawTextAt(mem, big, card.right - isz.cx - 18, card.top + 10, g_fBig, C_ACCENT);
+                DrawTextAt(mem, L"IOPS", card.right - 54, card.top + 44, g_fSmall, C_SUB);
+                swprintf(tmp, 256, L"%.1f MiB/s", c->mbps);
+                DrawTextAt(mem, tmp, card.right - 112, card.top + 62, g_fSmall, C_SUB);
+            }
+            LeaveCriticalSection(&c->lock);
+        }
         LeaveCriticalSection(&g_clientsLock);
         g_selected = -1;
         for (int i = 0; i < n; i++) {
