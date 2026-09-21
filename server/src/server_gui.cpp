@@ -426,6 +426,73 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         RECT rc; GetClientRect(hwnd, &rc);
         RECT pl = PanelLeft(rc);
         int cardW = pl.right - pl.left - 24, cardH = 118;
+
+        EnterCriticalSection(&g_clientsLock);
+        int n = (int)g_clients.size();
+        LeaveCriticalSection(&g_clientsLock);
+
+        g_selected = -1;
+        for (int i = 0; i < n; i++) {
+            int cy = pl.top + 48 + i * (cardH + 12);
+            if (cy + cardH > pl.bottom - 8) break;
+            if (x >= pl.left + 12 && x <= pl.left + 12 + cardW &&
+                y >= cy && y <= cy + cardH) { g_selected = i; break; }
+        }
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+    case WM_SIZE: {
+        RECT rc; GetClientRect(hwnd, &rc);
+        RECT pr = PanelRight(rc);
+        int x = pr.left + 24, w = pr.right - pr.left - 48;
+        MoveWindow(g_edThreads, x, pr.top + 68,  w, 26, TRUE);
+        MoveWindow(g_edQd,      x, pr.top + 126, w, 26, TRUE);
+        MoveWindow(g_edBlock,   x, pr.top + 184, w, 26, TRUE);
+        MoveWindow(g_edIops,    x, pr.top + 242, w, 26, TRUE);
+        MoveWindow(g_btnOne,    x, pr.top + 292, w, 32, TRUE);
+        MoveWindow(g_btnAll,    x, pr.top + 334, w, 32, TRUE);
+        return 0;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+
+        HDC mem = CreateCompatibleDC(dc);
+        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        HBITMAP ob = (HBITMAP)SelectObject(mem, bmp);
+
+        HBRUSH bg = CreateSolidBrush(C_BG);
+        FillRect(mem, &rc, bg);
+        DeleteObject(bg);
+
+        wchar_t tmp[512];
+
+        // ---- header ----
+        DrawTextAt(mem, L"DiskStress 控制中心", 20, 16, g_fTitle, C_TEXT);
+        EnterCriticalSection(&g_clientsLock);
+        int total = (int)g_clients.size(), online = 0;
+        for (int i = 0; i < total; i++) {
+            EnterCriticalSection(&g_clients[i]->lock);
+            if (g_clients[i]->online) online++;
+            LeaveCriticalSection(&g_clients[i]->lock);
+        }
+        LeaveCriticalSection(&g_clientsLock);
+        swprintf(tmp, 256, L"在线 %d / 共 %d     %s", online, total, g_status);
+        HFONT ofm = (HFONT)SelectObject(mem, g_fBody);
+        SIZE sz; GetTextExtentPoint32W(mem, tmp, (int)wcslen(tmp), &sz);
+        SelectObject(mem, ofm);
+        DrawTextAt(mem, tmp, rc.right - sz.cx - 20, 26, g_fBody, C_SUB);
+
+        // ---- 左面板【实时数据】 ----
+        RECT pl = PanelLeft(rc);
+        FillRound(mem, pl, 12, C_PANEL, C_BORDER);
+        DrawTextAt(mem, L"实时数据", pl.left + 18, pl.top + 12, g_fPanel, C_TEXT);
+        DrawTextAt(mem, L"每秒刷新 · 绿点在线 / 灰点离线 · 点击卡片选中",
+                   pl.left + 130, pl.top + 16, g_fSmall, C_SUB);
+
+        int cardW = pl.right - pl.left - 24, cardH = 118;
         int hidden = 0;
         EnterCriticalSection(&g_clientsLock);
         for (int i = 0; i < (int)g_clients.size(); i++) {
@@ -495,117 +562,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 DrawTextAt(mem, L"IOPS", card.right - 54, card.top + 44, g_fSmall, C_SUB);
                 swprintf(tmp, 256, L"%.1f MiB/s", c->mbps);
                 DrawTextAt(mem, tmp, card.right - 112, card.top + 62, g_fSmall, C_SUB);
-            }
-            LeaveCriticalSection(&c->lock);
-        }
-        LeaveCriticalSection(&g_clientsLock);
-        g_selected = -1;
-        for (int i = 0; i < n; i++) {
-            int cy = pl.top + 48 + i * (cardH + 10);
-            if (cy + cardH > pl.bottom - 8) break;
-            if (x >= pl.left + 12 && x <= pl.left + 12 + cardW &&
-                y >= cy && y <= cy + cardH) { g_selected = i; break; }
-        }
-        InvalidateRect(hwnd, NULL, FALSE);
-        return 0;
-    }
-    case WM_SIZE: {
-        RECT rc; GetClientRect(hwnd, &rc);
-        RECT pr = PanelRight(rc);
-        int x = pr.left + 24, w = pr.right - pr.left - 48;
-        MoveWindow(g_edThreads, x, pr.top + 68,  w, 26, TRUE);
-        MoveWindow(g_edQd,      x, pr.top + 126, w, 26, TRUE);
-        MoveWindow(g_edBlock,   x, pr.top + 184, w, 26, TRUE);
-        MoveWindow(g_edIops,    x, pr.top + 242, w, 26, TRUE);
-        MoveWindow(g_btnOne,    x, pr.top + 292, w, 32, TRUE);
-        MoveWindow(g_btnAll,    x, pr.top + 334, w, 32, TRUE);
-        return 0;
-    }
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-
-        HDC mem = CreateCompatibleDC(dc);
-        HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
-        HBITMAP ob = (HBITMAP)SelectObject(mem, bmp);
-
-        HBRUSH bg = CreateSolidBrush(C_BG);
-        FillRect(mem, &rc, bg);
-        DeleteObject(bg);
-
-        wchar_t tmp[512];
-
-        // ---- header ----
-        DrawTextAt(mem, L"DiskStress 控制中心", 20, 16, g_fTitle, C_TEXT);
-        EnterCriticalSection(&g_clientsLock);
-        int total = (int)g_clients.size(), online = 0;
-        for (int i = 0; i < total; i++) {
-            EnterCriticalSection(&g_clients[i]->lock);
-            if (g_clients[i]->online) online++;
-            LeaveCriticalSection(&g_clients[i]->lock);
-        }
-        LeaveCriticalSection(&g_clientsLock);
-        swprintf(tmp, 256, L"在线 %d / 共 %d     %s", online, total, g_status);
-        HFONT ofm = (HFONT)SelectObject(mem, g_fBody);
-        SIZE sz; GetTextExtentPoint32W(mem, tmp, (int)wcslen(tmp), &sz);
-        SelectObject(mem, ofm);
-        DrawTextAt(mem, tmp, rc.right - sz.cx - 20, 26, g_fBody, C_SUB);
-
-        // ---- 左面板【实时数据】 ----
-        RECT pl = PanelLeft(rc);
-        FillRound(mem, pl, 12, C_PANEL, C_BORDER);
-        DrawTextAt(mem, L"实时数据", pl.left + 18, pl.top + 12, g_fPanel, C_TEXT);
-        DrawTextAt(mem, L"每秒刷新 · 绿点在线 / 灰点离线 · 点击卡片选中",
-                   pl.left + 130, pl.top + 16, g_fSmall, C_SUB);
-
-        int cardW = pl.right - pl.left - 24, cardH = 104;
-        int hidden = 0;
-        EnterCriticalSection(&g_clientsLock);
-        for (int i = 0; i < (int)g_clients.size(); i++) {
-            Client* c = g_clients[i];
-            int cy = pl.top + 48 + i * (cardH + 10);
-            if (cy + cardH > pl.bottom - 8) { hidden++; continue; }
-            EnterCriticalSection(&c->lock);
-            RECT card = {pl.left + 12, cy, pl.left + 12 + cardW, cy + cardH};
-            bool sel = (i == g_selected);
-            FillRound(mem, card, 10, sel ? C_CARD_SEL : C_CARD, sel ? C_ACCENT : C_BORDER);
-
-            DrawDot(mem, card.left + 20, card.top + 24, 6, c->online ? C_GREEN : C_OFFLINE);
-            wchar_t hostW[128];
-            MultiByteToWideChar(CP_UTF8, 0, c->id.c_str(), -1, hostW, 128);
-            DrawTextAt(mem, hostW, card.left + 34, card.top + 12, g_fCard,
-                       c->online ? C_TEXT : C_OFFLINE);
-
-            wchar_t ipw[64], verw[32];
-            MultiByteToWideChar(CP_UTF8, 0, c->ip.c_str(), -1, ipw, 64);
-            MultiByteToWideChar(CP_UTF8, 0, c->ver.c_str(), -1, verw, 32);
-            swprintf(tmp, 256, L"%s   PID %u   v%s   %s", ipw, c->pid, verw,
-                     c->online ? L"在线" : L"离线");
-            DrawTextAt(mem, tmp, card.left + 34, card.top + 38, g_fBody, C_SUB);
-
-            swprintf(tmp, 256, L"写入 %llu    错误 %llu    运行 %llu 分 %llu 秒",
-                     (unsigned long long)c->writes, (unsigned long long)c->errors,
-                     c->uptime / 60, c->uptime % 60);
-            DrawTextAt(mem, tmp, card.left + 20, card.top + 66, g_fBody, C_TEXT);
-
-            swprintf(tmp, 256, L"线程 %u x QD %u · 块 %u B · IOPS %s%u",
-                     c->cfg.threads, c->cfg.qd, c->cfg.block,
-                     c->cfg.iops == 0 ? L"不限 " : L"≤ ", c->cfg.iops);
-            DrawTextAt(mem, tmp, card.left + 20, card.top + 88, g_fSmall, C_SUB);
-
-            if (c->online) {
-                wchar_t big[64];
-                if (c->iops >= 1000) swprintf(big, 64, L"%.1fK", c->iops / 1000.0);
-                else swprintf(big, 64, L"%.0f", c->iops);
-                HFONT ofb = (HFONT)SelectObject(mem, g_fBig);
-                SIZE isz; GetTextExtentPoint32W(mem, big, (int)wcslen(big), &isz);
-                SelectObject(mem, ofb);
-                DrawTextAt(mem, big, card.right - isz.cx - 16, card.top + 14, g_fBig, C_ACCENT);
-                DrawTextAt(mem, L"IOPS", card.right - 56, card.top + 46, g_fSmall, C_SUB);
-                swprintf(tmp, 256, L"%.1f MiB/s", c->mbps);
-                DrawTextAt(mem, tmp, card.right - 110, card.top + 62, g_fSmall, C_SUB);
             }
             LeaveCriticalSection(&c->lock);
         }
