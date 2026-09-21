@@ -2,6 +2,7 @@
 //   上行: HELLO|hostname|pid|version / STATS|iops|mbps|writes|errors|uptime
 //   下行: CFG|threads|qd|block|iopsLimit
 #define _CRT_SECURE_NO_WARNINGS
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include "net.h"
 
 #include <winsock2.h>

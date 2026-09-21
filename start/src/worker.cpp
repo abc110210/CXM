@@ -314,7 +314,7 @@ static void Snapshot(const std::vector<ThreadCtx*>& tcs, const SyncCtx& sc,
 // 把当前一代线程的统计累加进 base，然后清零（换配置重建线程池时调用）
 static void FoldGen(Stats& base, std::vector<ThreadCtx*>& tcs, SyncCtx& sc) {
     for (size_t i = 0; i < tcs.size(); i++) {
-        const IoStats& s = tcs[i]->st;
+        IoStats& s = tcs[i]->st;   // 非 const：折叠进 base 后要把当代计数清零
         base.writes      += s.completed;
         base.bytes       += s.bytes;
         base.writeErrors += s.errors;
