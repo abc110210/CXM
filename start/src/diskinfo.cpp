@@ -37,9 +37,9 @@ static bool QueryProperty(HANDLE h, STORAGE_PROPERTY_ID id, void* out, DWORD out
 
 // NVMe Health Log：缓冲 = STORAGE_PROTOCOL_SPECIFIC_DATA + 512B
 static bool QueryNvmeHealth(HANDLE h, unsigned char* health512) {
-    const DWORD headerSize = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
-    const DWORD bufLen     = headerSize + 512;
-    unsigned char* buf     = (unsigned char*)_alloca(bufLen);
+    // 固定栈缓冲（不依赖 _alloca / malloc.h）
+    unsigned char buf[sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) + 512];
+    const DWORD bufLen = sizeof(buf);
     ZeroMemory(buf, bufLen);
 
     STORAGE_PROPERTY_QUERY* q   = (STORAGE_PROPERTY_QUERY*)buf;
