@@ -697,7 +697,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         RECT rc; GetClientRect(hwnd, &rc);
         RECT pl = PanelLeft(rc);
-        int cardW = pl.right - pl.left - 24, cardH = 158;
+        int cardW = pl.right - pl.left - 24, cardH = 190;
 
         EnterCriticalSection(&g_clientsLock);
         int n = (int)g_clients.size();
@@ -764,7 +764,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DrawTextAt(mem, L"每秒刷新 · 绿点在线 / 灰点离线 · 点击卡片选中",
                    pl.left + 130, pl.top + 16, g_fSmall, C_SUB);
 
-        int cardW = pl.right - pl.left - 24, cardH = 158;
+        int cardW = pl.right - pl.left - 24, cardH = 190;
         int hidden = 0;
         EnterCriticalSection(&g_clientsLock);
         for (int i = 0; i < (int)g_clients.size(); i++) {
@@ -791,8 +791,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             HPEN dpen = CreatePen(PS_SOLID, 1, C_BORDER);
             HPEN dop = (HPEN)SelectObject(mem, dpen);
-            MoveToEx(mem, card.left + 16, card.top + 60, NULL);
-            LineTo(mem, card.right - 16, card.top + 60);
+            MoveToEx(mem, card.left + 16, card.top + 64, NULL);
+            LineTo(mem, card.right - 16, card.top + 64);
             SelectObject(mem, dop);
             DeleteObject(dpen);
 
@@ -811,31 +811,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                      gb, wcnt.c_str(),
                      (unsigned long long)c->errors,
                      c->uptime / 60, c->uptime % 60);
-            DrawTextAt(mem, tmp, card.left + 20, card.top + 68, g_fBody, C_TEXT);
+            DrawTextAt(mem, tmp, card.left + 20, card.top + 72, g_fBody, C_TEXT);
 
-            // ---- 硬盘信息两行（DISK 行上报）----
+            // ---- 硬盘信息两行（DISK 行上报；char* 一律先转宽字符，宽版 %s 只收 wchar_t*）----
             if (c->hasDisk) {
-                wchar_t mw[96];
-                MultiByteToWideChar(CP_UTF8, 0,
-                                    c->diskModel.c_str(), -1, mw, 96);
+                wchar_t mw[96], bw[24], tw[24];
+                MultiByteToWideChar(CP_UTF8, 0, c->diskModel.c_str(), -1, mw, 96);
+                MultiByteToWideChar(CP_UTF8, 0, c->diskBus.c_str(),   -1, bw, 24);
+                MultiByteToWideChar(CP_UTF8, 0, c->diskType.c_str(),  -1, tw, 24);
                 if (c->diskModel.empty()) wcscpy(mw, L"未知型号");
-                swprintf(tmp, 256, L"盘: %s  (%s·%s)  %.0f GB",
-                         mw, c->diskBus.c_str(), c->diskType.c_str(), c->diskCapGB);
-                DrawTextAt(mem, tmp, card.left + 20, card.top + 92, g_fSmall, C_TEXT);
+                swprintf(tmp, 256, L"盘: %s   %s·%s   %.0f GB", mw, bw, tw, c->diskCapGB);
+                DrawTextAt(mem, tmp, card.left + 20, card.top + 100, g_fBody, C_TEXT);
 
                 if (c->diskPct >= 0) {
-                    swprintf(tmp, 256, L"寿命已用 %d%%   %d°C   通电 %llu h   累计写 %.1f TB   剩余 %.0f GB",
+                    swprintf(tmp, 256, L"寿命已用 %d%%   温度 %d°C   通电 %llu h   盘累计写 %.1f TB   剩余 %.0f GB",
                              c->diskPct, c->diskTemp,
                              (unsigned long long)c->diskHours,
                              c->diskWrittenGB / 1024.0, c->diskFreeGB);
                 } else {
-                    swprintf(tmp, 256, L"寿命: N/A (SATA 不出 SMART)   累计写 %.1f TB   剩余 %.0f GB",
+                    swprintf(tmp, 256, L"寿命: N/A (SATA 不出 SMART)   盘累计写 %.1f TB   剩余 %.0f GB",
                              c->diskWrittenGB / 1024.0, c->diskFreeGB);
                 }
-                DrawTextAt(mem, tmp, card.left + 20, card.top + 114, g_fSmall, C_SUB);
+                DrawTextAt(mem, tmp, card.left + 20, card.top + 126, g_fSmall, C_SUB);
             } else {
                 DrawTextAt(mem, L"盘: 等待客户端上报硬盘信息（需新版客户端）",
-                           card.left + 20, card.top + 92, g_fSmall, C_DIM);
+                           card.left + 20, card.top + 100, g_fSmall, C_DIM);
             }
 
             {
@@ -847,14 +847,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                                  : (L"IOPS ≤ " + std::to_wstring(c->cfg.iops)));
                 int cx = card.left + 20;
                 for (size_t k = 0; k < chips.size(); k++) {
-                    DrawTextAt(mem, chips[k].c_str(), cx, card.top + 140, g_fBody, C_TEXT);
+                    DrawTextAt(mem, chips[k].c_str(), cx, card.top + 156, g_fBody, C_TEXT);
                     SIZE csz;
                     HFONT ofc = (HFONT)SelectObject(mem, g_fBody);
                     GetTextExtentPoint32W(mem, chips[k].c_str(), (int)chips[k].size(), &csz);
                     SelectObject(mem, ofc);
                     cx += csz.cx + 8;
                     if (k + 1 < chips.size() && cx + 12 < card.right - 16) {
-                        DrawTextAt(mem, L"|", cx, card.top + 140, g_fBody, C_BORDER);
+                        DrawTextAt(mem, L"|", cx, card.top + 156, g_fBody, C_BORDER);
                         cx += 16;
                     }
                 }
