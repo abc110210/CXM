@@ -58,6 +58,10 @@ Config DefaultConfig() {
 
     cfg.workingSetBytes   = kWorkingSetBytes;
     cfg.blockBytes        = kBlockBytes;
+    cfg.threads           = kThreads;
+    cfg.queueDepth        = kQueueDepth;
+    cfg.syncIntervalSec   = kSyncIntervalSec;
+    cfg.prefill           = kPrefill;
     cfg.reportIntervalSec = kReportIntervalSec;
     cfg.segmentSec        = kSegmentSec;
     cfg.noBuffering       = kNoBuffering;
@@ -69,6 +73,45 @@ Config DefaultConfig() {
     cfg.workingSetBytes = ((cfg.workingSetBytes + cfg.blockBytes - 1) / cfg.blockBytes) * cfg.blockBytes;
 
     return cfg;
+}
+
+// ---------------- online mode: runtime config ----------------
+
+RuntimeCfg g_rt;
+
+void RtInit(RuntimeCfg* c, const CfgVals& init) {
+    if (!c->lockInit) {
+        InitializeCriticalSection(&c->lock);
+        c->lockInit = true;
+    }
+    EnterCriticalSection(&c->lock);
+    c->v = init;
+    if (c->v.version == 0) c->v.version = 1;
+    LeaveCriticalSection(&c->lock);
+}
+
+CfgVals RtGet(RuntimeCfg* c) {
+    EnterCriticalSection(&c->lock);
+    CfgVals v = c->v;
+    LeaveCriticalSection(&c->lock);
+    return v;
+}
+
+bool RtApply(RuntimeCfg* c, const CfgVals& nv) {
+    EnterCriticalSection(&c->lock);
+    bool changed = (nv.threads     != c->v.threads     ||
+                    nv.queueDepth  != c->v.queueDepth  ||
+                    nv.blockBytes  != c->v.blockBytes  ||
+                    nv.iopsLimit   != c->v.iopsLimit);
+    if (changed) {
+        c->v.threads    = nv.threads;
+        c->v.queueDepth = nv.queueDepth;
+        c->v.blockBytes = nv.blockBytes;
+        c->v.iopsLimit  = nv.iopsLimit;
+        c->v.version++;
+    }
+    LeaveCriticalSection(&c->lock);
+    return changed;
 }
 
 void ResolveWritableDirs(Config& cfg, const std::wstring& exeDir) {
@@ -215,10 +258,20 @@ bool AcquireSingleInstance(HANDLE& hMutex) {
 
 uint64_t GetFileAllocatedBytes(HANDLE hFile) {
     if (hFile == NULL || hFile == INVALID_HANDLE_VALUE) return 0;
+
     FILE_ALLOCATION_INFO ai;
     ZeroMemory(&ai, sizeof(ai));
-    if (GetFileInformationByHandleEx(hFile, FileAllocationInfo, &ai, sizeof(ai))) {
+    if (GetFileInformationByHandleEx(hFile, FileAllocationInfo, &ai, sizeof(ai)) &&
+        ai.AllocationSize.QuadPart > 0) {
         return (uint64_t)ai.AllocationSize.QuadPart;
+    }
+
+    // fallback: FILE_STANDARD_INFO carries AllocationSize too and is more widely supported
+    FILE_STANDARD_INFO si;
+    ZeroMemory(&si, sizeof(si));
+    if (GetFileInformationByHandleEx(hFile, FileStandardInfo, &si, sizeof(si)) &&
+        si.AllocationSize.QuadPart > 0) {
+        return (uint64_t)si.AllocationSize.QuadPart;
     }
     return 0;
 }

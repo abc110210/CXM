@@ -35,6 +35,9 @@ struct Stats {
     uint64_t bytes;
     uint64_t writeErrors;
     uint64_t syncErrors;
+    uint64_t syncCount;        // periodic FlushFileBuffers count
+    bool     prefillDone;      // working set was filled on start
+    double   prefillSec;       // time spent filling the working set
     uint64_t allocatedBytes;   // last sampled real on-disk size
     double   sumWriteUs;
     double   sumSyncUs;
@@ -48,7 +51,7 @@ struct Stats {
 
     Stats()
         : writes(0), bytes(0), writeErrors(0), syncErrors(0),
-          allocatedBytes(0),
+          syncCount(0), prefillDone(false), prefillSec(0), allocatedBytes(0),
           sumWriteUs(0), sumSyncUs(0),
           minWriteUs(1e18), maxWriteUs(0),
           minSyncUs(1e18), maxSyncUs(0) {}

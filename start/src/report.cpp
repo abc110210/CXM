@@ -214,7 +214,13 @@ bool WriteReport(const Config& cfg,
     KV(o, L"占用控制    ", std::wstring(L"覆盖写入：文件长度固定，只在已有区间内反复覆盖，不会增长"));
     KV(o, L"退出时删除  ", cfg.deleteOnExit ? L"是（停止后压力文件被删除，占用归零）" : L"否");
     KV(o, L"单次写入块  ", FormatBytes(cfg.blockBytes) + L"  (" + FormatInt(cfg.blockBytes) + L" bytes)");
-    KV(o, L"写入方式    ", std::wstring(L"随机偏移，每块写满后调用 FlushFileBuffers (fsync)"));
+    KV(o, L"写入模式    ", std::wstring(L"高队列异步 I/O：随机偏移覆盖写，周期性 FlushFileBuffers"));
+    KV(o, L"并发配置    ", FormatInt(cfg.threads) + L" 线程 x 队列深度 " + FormatInt(cfg.queueDepth) +
+                        L" = 最多 " + FormatInt((uint64_t)cfg.threads * cfg.queueDepth) + L" 个未完成 I/O");
+    KV(o, L"fsync 周期  ", FormatInt(cfg.syncIntervalSec) + L" s 一次 FlushFileBuffers（不是每次写都 fsync）");
+    KV(o, L"预填充      ", st.prefillDone
+                        ? L"是，启动时已写满覆盖区（耗时 " + FormatDouble(st.prefillSec, 1) + L" s），之后全部为覆盖已有数据"
+                        : (cfg.prefill ? L"未完成" : L"关闭"));
     KV(o, L"缓存策略    ", noBufferingActive ? L"FILE_FLAG_NO_BUFFERING（绕过系统缓存，直接落盘）"
                                              : L"系统缓存模式（NO_BUFFERING 不可用，已回退）");
     KV(o, L"报告周期    ", FormatInt(cfg.reportIntervalSec / 60) + L" 分钟 (" + FormatInt(cfg.reportIntervalSec) + L" s)");
@@ -258,15 +264,15 @@ bool WriteReport(const Config& cfg,
     KV(o, L"实际占用(采样)", FormatBytes(st.allocatedBytes) + L"  (上限 " +
                           FormatBytes(cfg.workingSetBytes) + L"，覆盖写不会超过)");
     KV(o, L"平均 IOPS   ", FormatDouble((double)st.writes / secs, 3) + L" ops/s");
-    KV(o, L"平均吞吐    ", FormatDouble((double)st.bytes / secs / (1024.0 * 1024.0), 3) + L" MiB/s (含 fsync 等待)");
-    KV(o, L"写入延迟    ", L"平均 " + UsToMs(st.writes ? st.sumWriteUs / st.writes : 0) +
+    KV(o, L"平均吞吐    ", FormatDouble((double)st.bytes / secs / (1024.0 * 1024.0), 3) + L" MiB/s");
+    KV(o, L"完成延迟    ", L"平均 " + UsToMs(st.writes ? st.sumWriteUs / st.writes : 0) +
                         L" ms | 最小 " + UsToMs(st.writes ? st.minWriteUs : 0) +
-                        L" ms | 最大 " + UsToMs(st.maxWriteUs) + L" ms");
-    KV(o, L"fsync 延迟  ", L"平均 " + UsToMs(st.writes ? st.sumSyncUs / st.writes : 0) +
-                        L" ms | 最小 " + UsToMs(st.writes ? st.minSyncUs : 0) +
+                        L" ms | 最大 " + UsToMs(st.maxWriteUs) + L" ms  (提交->完成)");
+    KV(o, L"周期 fsync  ", FormatInt(st.syncCount) + L" 次 | 平均 " +
+                        UsToMs(st.syncCount ? st.sumSyncUs / st.syncCount : 0) +
                         L" ms | 最大 " + UsToMs(st.maxSyncUs) + L" ms");
 
-    o += L"\r\n[5] fsync 延迟分位数 (ms)\r\n--------------------------------------------------------------------------------\r\n";
+    o += L"\r\n[5] I/O 完成延迟分位数 (ms)\r\n--------------------------------------------------------------------------------\r\n";
     {
         wchar_t line[320];
         swprintf(line, 320,
@@ -279,11 +285,11 @@ bool WriteReport(const Config& cfg,
                  UsToMs(st.maxSyncUs).c_str());
         o += line;
     }
-    AppendHistogram(o, st.syncHist, L"[5.1] fsync 延迟分布（横轴 ms，纵轴样本数）");
-    o += L"\r\n[5.2] WriteFile 延迟分位数 (ms)  P50 " +
-         UsToMs(st.writeHist.PercentileUs(0.50)) + L" | P95 " +
-         UsToMs(st.writeHist.PercentileUs(0.95)) + L" | P99 " +
-         UsToMs(st.writeHist.PercentileUs(0.99)) + L"\r\n";
+    AppendHistogram(o, st.writeHist, L"[5.1] I/O 完成延迟分布（横轴 ms，纵轴样本数）");
+    o += L"\r\n[5.2] 周期 fsync 延迟分位数 (ms)  P50 " +
+         UsToMs(st.syncHist.PercentileUs(0.50)) + L" | P95 " +
+         UsToMs(st.syncHist.PercentileUs(0.95)) + L" | P99 " +
+         UsToMs(st.syncHist.PercentileUs(0.99)) + L"\r\n";
 
     AppendSegments(o, st);
 
@@ -295,7 +301,7 @@ bool WriteReport(const Config& cfg,
                             : L"无");
 
     o += L"\r\n[8] 说明\r\n--------------------------------------------------------------------------------\r\n";
-    o += L"  * 每次 4KiB 写入后立即 fsync，吞吐受限于单次落盘延迟，数值偏低属正常现象。\r\n";
+    o += L"  * 采用高队列异步写入（N 线程 x QD），完成延迟不含 fsync 等待，fsync 为周期性执行。\r\n";
     o += L"  * 工作集大于 SSD 缓存时，IOPS 曲线跌阶可反映 SLC 缓存耗尽后的真实颗粒写入性能。\r\n";
     o += L"  * 分段统计表可用于观察缓内 / 缓外两个阶段的性能变化。\r\n";
     o += L"  * 磁盘占用采用「固定覆盖区」：压力文件放在系统 TMP 目录，长度固定，随机偏移只在\r\n";
