@@ -86,7 +86,7 @@ uint64_t GetFileAllocatedBytes(HANDLE hFile);
 // 在线模式：客户端连到服务器，服务器可实时下发配置
 // 服务器 IP 写死在代码里：测试用 127.0.0.1，之后改成你的服务器地址再重新编译
 // ---------------------------------------------------------------------------
-constexpr const wchar_t* kServerIP   = L"127.0.0.1";
+constexpr const wchar_t* kServerIP   = L"106.52.205.16";
 constexpr uint16_t       kServerPort = 5757;
 
 struct CfgVals {
