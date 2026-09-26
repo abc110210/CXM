@@ -1096,10 +1096,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             Client* c = g_clients[i];
             g_selected = i;
 
-            // Top5 行右侧「关闭」命中（优先于选中）
+            // Top5 行右侧「关闭」命中（优先于选中；区域加宽便于点击）
             EnterCriticalSection(&c->lock);
             if (y >= cy + TOP5_Y && y < cy + TOP5_Y + c->top5n * ROW_H &&
-                x >= pl.left + 12 + cardW - 74 && x <= pl.left + 12 + cardW - 14) {
+                x >= pl.left + 12 + cardW - 90 && x <= pl.left + 12 + cardW - 14) {
                 killPid = c->top5[(y - (cy + TOP5_Y)) / ROW_H].pid;
                 killClient = c;
             }
@@ -1292,8 +1292,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
 
-            // ---- Top5 CPU 占用（PROC 行随 STATS 每 2s 刷新）----
-            DrawTextAt(mem, L"Top5 CPU 占用（点「关闭」强制结束该进程）",
+            // ---- Top5 CPU 占用（PROC 行每 10s 刷新一次）----
+            DrawTextAt(mem, L"Top5 CPU 占用（10 秒刷新 · 点「关闭」强制结束）",
                        card.left + 20, card.top + 172, g_fSmall, C_SUB);
             for (int r = 0; r < c->top5n; r++) {
                 int ry = card.top + 188 + r * 15;
@@ -1304,9 +1304,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 DrawTextAt(mem, tmp, card.left + 20, ry, g_fSmall,
                            hot ? RGB(255, 150, 90) : C_TEXT);
                 swprintf(tmp, 256, L"%.1f%%", c->top5[r].cpu);
-                DrawTextAt(mem, tmp, card.right - 140, ry, g_fSmall,
+                DrawTextAt(mem, tmp, card.right - 150, ry, g_fSmall,
                            hot ? RGB(255, 150, 90) : C_TEXT);
-                DrawTextAt(mem, L"关闭", card.right - 76, ry, g_fSmall, C_ACCENT);
+                DrawTextAt(mem, L"关闭", card.right - 88, ry, g_fSmall, C_ACCENT);
             }
 
             if (c->online) {

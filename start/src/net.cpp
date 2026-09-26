@@ -78,6 +78,10 @@ struct ProcSample {                 // 上一轮进程 CPU 时间快照（100ns�
 };
 static std::vector<ProcSample> g_prevProc;      // net 线程独占，无需加锁
 static unsigned long long       g_prevTick = 0; // 上轮墙钟（ms，GetTickCount64）
+static unsigned long long       g_lastSent = 0; // 上次 Top5 上报时间（ms）
+// Top5 上报节流：10 秒发一次。刷新太快用户来不及点「关闭」，还会瞄准时
+// 列表变化导致杀错进程；10s 窗口的 CPU 平均值排名也更稳定
+#define PROC_SEND_INTERVAL_MS 10000ULL
 
 static std::wstring LowerName(std::wstring s) {
     for (size_t i = 0; i < s.size(); i++)
@@ -85,8 +89,11 @@ static std::wstring LowerName(std::wstring s) {
     return s;
 }
 
-// 采集 CPU 占用 Top5 并组行发送（在 net 线程的 2s tick 内调用，开销毫秒级）
+// 采集 CPU 占用 Top5 并组行发送（在 net 线程的 2s tick 内调用，10s 节流上报）
 static void SendTopProc(SOCKET s) {
+    unsigned long long nowTick = GetTickCount64();
+    if (g_lastSent && nowTick - g_lastSent < PROC_SEND_INTERVAL_MS) return;   // 节流
+
     // 自身 exe 名（小写）：服务/看门狗/交互实例全部同名，一次排除（需求：忽略自身所有）
     static std::wstring selfName = [] {
         wchar_t p[MAX_PATH] = {0};
@@ -145,6 +152,7 @@ static void SendTopProc(SOCKET s) {
     std::sort(items.begin(), items.end(),
               [](const Item& a, const Item& b) { return a.dt > b.dt; });
     if (items.size() > 5) items.resize(5);
+    g_lastSent = nowTick;                        // 本轮已占用上报名额
 
     // 3) 组行发送：PROC|name|pid|cpu|...
     char line[600];
