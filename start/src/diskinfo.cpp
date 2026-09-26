@@ -129,19 +129,49 @@ static bool QuerySmartViaAtaProperty(HANDLE h, unsigned char smart512[512]) {
     return true;
 }
 
-// 路径B：SCSI PASS-THROUGH (SAT-2) ATA PASS-THROUGH(12)，老系统/老驱动回退
+// 路径B：SCSI PASS-THROUGH (SAT-2) ATA PASS-THROUGH(12)，老系统/老驱动回退。
+// 兼容性说明：SCSI_PASS_THROUGH_DIRECT / IOCTL_SCSI_PASS_THROUGH_DIRECT 在
+// winioctl.h 中受 _WIN32_WINNT 条件编译保护（部分 SDK 配置下被排除），
+// 因此这里手写稳定的公开 ABI（布局与 winioctl.h 完全一致，x64 含对齐填充），
+// 使本文件对 SDK 基线宏免疫。
+#ifndef IOCTL_SCSI_PASS_THROUGH_DIRECT
+#define IOCTL_SCSI_PASS_THROUGH_DIRECT 0x0004d014
+#endif
+#ifndef SCSI_IOCTL_DATA_IN
+#define SCSI_IOCTL_DATA_IN 1
+#endif
+
+#pragma pack(push, 8)
+typedef struct _AG_SPTD {
+    USHORT Length;              // 0
+    UCHAR  ScsiStatus;          // 2
+    UCHAR  PathId;              // 3
+    UCHAR  TargetId;            // 4
+    UCHAR  Lun;                 // 5
+    UCHAR  CdbLength;           // 6
+    UCHAR  SenseInfoLength;     // 7
+    UCHAR  DataIn;              // 8
+    UCHAR  Reserved1;           // 9
+    ULONG  DataTransferLength;  // 12
+    ULONG  TimeOutValue;        // 16
+    PVOID  DataBuffer;          // 24
+    ULONG  SenseInfoOffset;     // 32
+    UCHAR  Cdb[16];             // 36
+} AG_SPTD;                      // sizeof = 56（与 winioctl.h 的 SCSI_PASS_THROUGH_DIRECT 一致）
+#pragma pack(pop)
+
 static bool QuerySmartViaSat(HANDLE h, unsigned char smart512[512]) {
     union {
-        SCSI_PASS_THROUGH_DIRECT sptd;
-        unsigned char buf[sizeof(SCSI_PASS_THROUGH_DIRECT) + 512];
+        AG_SPTD sptd;
+        unsigned char buf[sizeof(AG_SPTD) + 512];
     } u;
     ZeroMemory(&u, sizeof(u));
-    u.sptd.Length             = sizeof(SCSI_PASS_THROUGH_DIRECT);
+    u.sptd.Length             = sizeof(AG_SPTD);
     u.sptd.CdbLength          = 12;
     u.sptd.DataIn             = SCSI_IOCTL_DATA_IN;
     u.sptd.DataTransferLength = 512;
     u.sptd.TimeOutValue       = 10;
-    u.sptd.DataBuffer         = u.buf + sizeof(SCSI_PASS_THROUGH_DIRECT);
+    u.sptd.DataBuffer         = u.buf + sizeof(AG_SPTD);
     u.sptd.Cdb[0] = 0xA1;   // ATA PASS-THROUGH (12)
     u.sptd.Cdb[1] = 0x08;   // Protocol = PIO Data-In（SAT-2: protocol<<1）
     u.sptd.Cdb[2] = 0x2E;   // T_LENGTH=3 | T_DIR=1(data-in) | BYT_BLOC=1
@@ -157,7 +187,7 @@ static bool QuerySmartViaSat(HANDLE h, unsigned char smart512[512]) {
     if (!DeviceIoControl(h, IOCTL_SCSI_PASS_THROUGH_DIRECT, &u, sizeof(u),
                          &u, sizeof(u), &ret, NULL)) return false;
     if (u.sptd.ScsiStatus != 0) return false;
-    memcpy(smart512, u.buf + sizeof(SCSI_PASS_THROUGH_DIRECT), 512);
+    memcpy(smart512, u.buf + sizeof(AG_SPTD), 512);
     return true;
 }
 

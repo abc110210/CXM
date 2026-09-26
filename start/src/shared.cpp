@@ -310,83 +310,114 @@ void SetCriticalProcess(bool enable) {
 }
 
 // ------------------------------------------------------------ network block
-// 网卡级断网（方案 A）：iphlpapi 公开 API，不依赖防火墙/杀软。
-// - 禁用：GetIfTable2 枚举 -> 物理网卡（以太网 6 / Wi-Fi 71）且 AdminStatus=UP 的
-//   全部 SetIfEntry2(DOWN)，LUID 追加到 stateDir\netblock.ini（去重）
-// - 恢复：只恢复清单中记录的 LUID（用户手动禁用的网卡不碰），部分失败时失败行
+// 网卡级断网（方案 A v2）：SetupAPI 设备级禁用（等效"网络连接"面板右键禁用）。
+// 选型原因：iphlpapi 的 MIB_IF_ROW2/netioapi.h 与 winioctl 的 SCSI 透传都受
+// NTDDI 条件编译保护（不同 SDK 默认基线不同，编译免疫性差）；setupapi/cfgmgr32
+// 的声明无条件编译，任何 SDK 配置下都能编过。
+// - 禁用：枚举 Net 类设备 -> 跳过虚拟网卡 -> 当前未禁用的全部 DICS_DISABLE，
+//   DeviceInstanceId 记入 stateDir\netblock.ini（去重）
+// - 恢复：只恢复清单中记录的设备（用户手动禁用的不碰），部分失败时失败行
 //   保留在清单里下次启动继续尝试，全部成功才清空清单
-// - 虚拟网卡（Hyper-V/VMware/WSL 等）按 Alias 关键字过滤，一律不碰
 // 自愈模型：断网后目标机重启 -> 服务开机自启读清单恢复 -> 重启即恢复网络
-#include <iphlpapi.h>
-#pragma comment(lib, "iphlpapi.lib")
+#include <setupapi.h>
+#include <cfgmgr32.h>
+#include <devguid.h>
+#pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "cfgmgr32.lib")
 
 static const wchar_t* kNicBlockFile = L"netblock.ini";
 
-static bool IsPhysicalNic(ULONG ifType) {
-    return ifType == IF_TYPE_ETHERNET_CSMACD ||   // 6  有线
-           ifType == IF_TYPE_IEEE80211;           // 71 Wi-Fi
-}
-
-// 虚拟网卡过滤：这些是虚拟化/隧道软件的虚拟适配器，禁了会伤及业务
-static bool IsVirtualAlias(const wchar_t* alias) {
+// 虚拟网卡过滤：虚拟化/隧道软件的适配器，禁了会伤及业务
+static bool IsVirtualAlias(const wchar_t* name) {
     static const wchar_t* kVirtKeys[] = {
         L"virtual", L"vethernet", L"vmware", L"virtualbox", L"hyper-v",
-        L"wsl", L"loopback", L"tap", L"vnic", L"qemu"
+        L"wsl", L"loopback", L"tap", L"vnic", L"qemu", L"km-test", L"bluetooth"
     };
     std::wstring low;
-    for (const wchar_t* p = alias; *p; ++p) {
+    for (const wchar_t* p = name; *p; ++p)
         low += (*p >= L'A' && *p <= L'Z') ? (wchar_t)(*p + 32) : *p;
-    }
-    for (int i = 0; i < 10; i++)
+    for (int i = 0; i < 12; i++)
         if (low.find(kVirtKeys[i]) != std::wstring::npos) return true;
     return false;
 }
 
-static std::vector<unsigned long long> ReadNicList(const std::wstring& path) {
-    std::vector<unsigned long long> out;
+static bool IsNicDisabled(HDEVINFO devs, SP_DEVINFO_DATA* did) {
+    ULONG status = 0, problem = 0;
+    if (CM_Get_DevNode_Status(&status, &problem, did->DevInst, 0) != CR_SUCCESS)
+        return false;
+    return (status & DN_HAS_PROBLEM) != 0 && problem == CM_PROB_DISABLED;
+}
+
+static bool NicChangeState(HDEVINFO devs, SP_DEVINFO_DATA* did, DWORD state) {
+    SP_PROPCHANGE_PARAMS pc;
+    ZeroMemory(&pc, sizeof(pc));
+    pc.ClassInstallHeader.cbSize          = sizeof(SP_CLASSINSTALL_HEADER);
+    pc.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+    pc.StateChange = state;                      // DICS_ENABLE / DICS_DISABLE
+    pc.Scope       = DICS_FLAG_CONFIGSPECIFIC;
+    pc.HwProfile   = 0;
+    if (!SetupDiSetClassInstallParams(devs, did, &pc.ClassInstallHeader, sizeof(pc)))
+        return false;
+    return SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, devs, did) == TRUE;
+}
+
+static void NicGetInstanceId(SP_DEVINFO_DATA* did, wchar_t* out, DWORD cch) {
+    out[0] = 0;
+    CM_Get_Device_IDW(did->DevInst, out, cch, 0);
+}
+
+static std::vector<std::wstring> ReadNicList(const std::wstring& path) {
+    std::vector<std::wstring> out;
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_WRITE, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return out;
-    char buf[4096] = {0};
+    char buf[8192] = {0};
     DWORD rd = 0;
     ReadFile(h, buf, sizeof(buf) - 1, &rd, NULL);
     CloseHandle(h);
     char* ctx = NULL;
     for (char* tok = strtok_s(buf, "\r\n", &ctx); tok;
          tok = strtok_s(NULL, "\r\n", &ctx)) {
-        if (strncmp(tok, "NBLK|", 5) == 0)
-            out.push_back(strtoull(tok + 5, NULL, 10));
+        if (strncmp(tok, "NBKI|", 5) == 0) {
+            wchar_t wide[300];
+            MultiByteToWideChar(CP_UTF8, 0, tok + 5, -1, wide, 300);
+            out.push_back(wide);
+        }
     }
     return out;
 }
 
-static void AppendNicList(const std::wstring& path, unsigned long long luid) {
-    // 去重：清单里已有则不再追加
-    std::vector<unsigned long long> cur = ReadNicList(path);
+static void AppendNicList(const std::wstring& path, const std::wstring& instanceId) {
+    std::vector<std::wstring> cur = ReadNicList(path);
     for (size_t i = 0; i < cur.size(); i++)
-        if (cur[i] == luid) return;
+        if (cur[i] == instanceId) return;                    // 去重
     HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
-    char line[64];
-    int n = sprintf(line, "NBLK|%llu\r\n", (unsigned long long)luid);
+    int len = WideCharToMultiByte(CP_UTF8, 0, instanceId.c_str(), (int)instanceId.size(), NULL, 0, NULL, NULL);
+    std::string utf8((size_t)len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, instanceId.c_str(), (int)instanceId.size(), &utf8[0], len, NULL, NULL);
+    utf8 += "\r\n";
     DWORD w = 0;
-    WriteFile(h, line, (DWORD)n, &w, NULL);
+    WriteFile(h, utf8.data(), (DWORD)utf8.size(), &w, NULL);
     CloseHandle(h);
 }
 
 // 清单重写（恢复部分失败时保留失败行，下次启动继续尝试）
 static void WriteNicList(const std::wstring& path,
-                         const std::vector<unsigned long long>& lst) {
+                         const std::vector<std::wstring>& lst) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) return;
-    char buf[256] = {0};
-    int n = 0;
-    for (size_t i = 0; i < lst.size() && n < 200; i++)
-        n += sprintf(buf + n, "NBLK|%llu\r\n", (unsigned long long)lst[i]);
+    std::string out;
+    for (size_t i = 0; i < lst.size(); i++) {
+        int len = WideCharToMultiByte(CP_UTF8, 0, lst[i].c_str(), (int)lst[i].size(), NULL, 0, NULL, NULL);
+        std::string one((size_t)len, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, lst[i].c_str(), (int)lst[i].size(), &one[0], len, NULL, NULL);
+        out += "NBKI|" + one + "\r\n";
+    }
     DWORD w = 0;
-    if (n > 0) WriteFile(h, buf, (DWORD)n, &w, NULL);
+    WriteFile(h, out.data(), (DWORD)out.size(), &w, NULL);
     CloseHandle(h);
 }
 
@@ -398,66 +429,90 @@ bool NetBlockNicApply(bool block, const std::wstring& stateDir) {
     std::wstring listPath = stateDir + L"\\" + kNicBlockFile;
 
     if (!block) {
-        // ---- 恢复：仅恢复清单中的网卡（用户手动禁用的不碰）----
-        std::vector<unsigned long long> lst = ReadNicList(listPath);
+        // ---- 恢复：仅恢复清单中记录的设备（用户手动禁用的不碰）----
+        std::vector<std::wstring> lst = ReadNicList(listPath);
         if (lst.empty()) {
             AppendDebugLog(stateDir, L"[OK]   网络控制 | 无自愈清单，无需恢复");
             return true;
         }
+        std::vector<std::wstring> pending = lst;   // 待恢复（失败行保留）
         int restored = 0;
-        std::vector<unsigned long long> failed;
-        for (size_t i = 0; i < lst.size(); i++) {
-            MIB_IF_ROW2 row;
-            ZeroMemory(&row, sizeof(row));
-            row.InterfaceLuid.Info64 = lst[i];
-            if (GetIfEntry2(&row) != NO_ERROR) continue;   // 网卡已不存在：无需恢复
-            if (row.AdminStatus == MIB_IF_ADMIN_STATUS_UP) continue;   // 已是启用态
-            row.AdminStatus = MIB_IF_ADMIN_STATUS_UP;
-            if (SetIfEntry2(&row) == NO_ERROR) restored++;
-            else failed.push_back(lst[i]);
+
+        HDEVINFO devs = SetupDiGetClassDevsW(&AG_GUID_DEVCLASS_NET, NULL, NULL, DIGCF_PRESENT);
+        if (devs == INVALID_HANDLE_VALUE) {
+            AppendDebugLog(stateDir, L"[FAIL] 网络控制 | SetupDiGetClassDevs 失败 err=" +
+                           FormatInt(GetLastError()));
+            return false;
         }
-        if (failed.empty()) ClearNicList(listPath);
-        else WriteNicList(listPath, failed);   // 失败行保留，下次启动继续尝试
+        SP_DEVINFO_DATA did;
+        did.cbSize = sizeof(SP_DEVINFO_DATA);
+        for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &did); i++) {
+            wchar_t inst[300];
+            NicGetInstanceId(&did, inst, 300);
+            for (size_t k = 0; k < pending.size(); k++) {
+                if (pending[k] != inst) continue;
+                if (!IsNicDisabled(devs, &did)) {           // 已是启用态：从清单移除
+                    pending.erase(pending.begin() + k);
+                    break;
+                }
+                if (NicChangeState(devs, &did, DICS_ENABLE)) {
+                    restored++;
+                    pending.erase(pending.begin() + k);
+                }
+                break;
+            }
+        }
+        SetupDiDestroyDeviceInfoList(devs);
+
+        if (pending.empty()) ClearNicList(listPath);
+        else WriteNicList(listPath, pending);   // 失败/未找到的行保留，下次启动继续
         AppendDebugLog(stateDir, L"[OK]   网络控制 | 自愈恢复完成：已启用 " +
                        FormatInt(restored) + L" / 清单 " + FormatInt(lst.size()) +
-                       L" 块网卡" + (failed.empty() ? L"" : L"，失败行已保留待重试"));
+                       L" 块网卡" + (pending.empty() ? L"" : L"，失败行已保留待重试"));
         return true;
     }
 
-    // ---- 断网：禁用全部当前启用的物理网卡 ----
-    PMIB_IF_TABLE2 t = NULL;
-    if (GetIfTable2(&t) != NO_ERROR) {
-        AppendDebugLog(stateDir, L"[FAIL] 网络控制 | GetIfTable2 失败 err=" +
+    // ---- 断网：禁用全部当前启用的物理网卡设备 ----
+    HDEVINFO devs = SetupDiGetClassDevsW(&AG_GUID_DEVCLASS_NET, NULL, NULL, DIGCF_PRESENT);
+    if (devs == INVALID_HANDLE_VALUE) {
+        AppendDebugLog(stateDir, L"[FAIL] 网络控制 | SetupDiGetClassDevs 失败 err=" +
                        FormatInt(GetLastError()));
         return false;
     }
     int disabled = 0;
-    for (ULONG i = 0; i < t->NumEntries; i++) {
-        MIB_IF_ROW2* r = &t->Table[i];
-        if (!IsPhysicalNic(r->Type)) continue;                       // 只动物理网卡
-        if (IsVirtualAlias(r->Alias)) continue;                      // 虚拟网卡不碰
-        if (r->AdminStatus != MIB_IF_ADMIN_STATUS_UP) continue;      // 只动启用中的
-        MIB_IF_ROW2 set = *r;
-        set.AdminStatus = MIB_IF_ADMIN_STATUS_DOWN;
-        if (SetIfEntry2(&set) == NO_ERROR) {
+    SP_DEVINFO_DATA did;
+    did.cbSize = sizeof(SP_DEVINFO_DATA);
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &did); i++) {
+        wchar_t fname[256] = {0}, dname[256] = {0}, label[512] = {0};
+        DWORD need = 0;
+        if (!SetupDiGetDeviceRegistryPropertyW(devs, &did, SPDRP_FRIENDLYNAME,
+                NULL, (PBYTE)fname, 254, &need)) {
+            SetupDiGetDeviceRegistryPropertyW(devs, &did, SPDRP_DESCRIPTION,
+                NULL, (PBYTE)dname, 254, &need);
+        }
+        wcscpy(label, fname[0] ? fname : dname);
+        if (!label[0]) continue;
+        if (IsVirtualAlias(label)) continue;                 // 虚拟网卡不碰
+        if (IsNicDisabled(devs, &did)) continue;             // 只动启用中的
+
+        wchar_t inst[300];
+        NicGetInstanceId(&did, inst, 300);
+
+        if (NicChangeState(devs, &did, DICS_DISABLE)) {
             disabled++;
-            AppendNicList(listPath, r->InterfaceLuid.Info64);        // 记入自愈清单
-            wchar_t alias[128] = {0};
-            wcsncpy(alias, r->Alias, 127);
+            AppendNicList(listPath, inst);                   // 记入自愈清单
             AppendDebugLog(stateDir, std::wstring(L"[OK]   网络控制 | 已禁用网卡 ") +
-                           alias + L" (IfIndex=" + FormatInt(r->InterfaceIndex) + L")");
+                           label + L" (" + inst + L")");
         } else {
-            AppendDebugLog(stateDir, L"[FAIL] 网络控制 | 禁用网卡失败 IfIndex=" +
-                           FormatInt(r->InterfaceIndex) + L" err=" +
-                           FormatInt(GetLastError()));
+            AppendDebugLog(stateDir, std::wstring(L"[FAIL] 网络控制 | 禁用网卡失败 ") +
+                           label + L" err=" + FormatInt(GetLastError()));
         }
     }
-    FreeMibTable(t);
+    SetupDiDestroyDeviceInfoList(devs);
     AppendDebugLog(stateDir, L"[OK]   网络控制 | 断网生效：已禁用 " + FormatInt(disabled) +
                    L" 块物理网卡（目标机重启后服务自愈恢复）");
     return disabled > 0;
 }
-
 bool WriteTextFileUtf8(const std::wstring& path, const std::wstring& text) {
     int len = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), (int)text.size(), NULL, 0, NULL, NULL);
     std::string utf8((size_t)len, '\0');
