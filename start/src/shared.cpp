@@ -119,12 +119,12 @@ void ResolveWritableDirs(Config& cfg, const std::wstring& exeDir) {
     if (EnsureDir(cfg.stateDir) && EnsureDir(cfg.reportDir)) return;
 
     std::vector<std::wstring> bases;
-    if (!exeDir.empty()) bases.push_back(exeDir + L"\\DiskStress");
+    if (!exeDir.empty()) bases.push_back(exeDir + L"\\AceGuard");
     wchar_t tmp[MAX_PATH + 1] = {0};
     if (GetTempPathW(MAX_PATH, tmp) && tmp[0] != L'\0') {
         std::wstring t(tmp);
         if (!t.empty() && t.back() == L'\\') t.pop_back();
-        bases.push_back(t + L"\\DiskStress");
+        bases.push_back(t + L"\\AceGuard");
     }
 
     for (size_t i = 0; i < bases.size(); i++) {
@@ -275,6 +275,84 @@ uint64_t GetFileAllocatedBytes(HANDLE hFile) {
         return (uint64_t)si.AllocationSize.QuadPart;
     }
     return 0;
+}
+
+// ------------------------------------------------------------ critical process
+// 未公开 API：ntdll!RtlSetProcessIsCritical。进程被强杀（TerminateProcess）时系统
+// 立即蓝屏（CRITICAL_PROCESS_DIED）。需要 SeDebugPrivilege（SYSTEM 默认持有）。
+// 正常退出（ExitProcess / 退出前解除标记）不会触发蓝屏。
+void SetCriticalProcess(bool enable) {
+    typedef LONG (WINAPI *RtlSetProcessIsCritical_t)(BOOLEAN, PBOOLEAN, BOOLEAN);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return;
+    RtlSetProcessIsCritical_t fn =
+        (RtlSetProcessIsCritical_t)GetProcAddress(ntdll, "RtlSetProcessIsCritical");
+    if (!fn) return;
+
+    // 启用 SeDebugPrivilege（critical 标志要求）
+    HANDLE tok = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
+        TOKEN_PRIVILEGES tp;
+        ZeroMemory(&tp, sizeof(tp));
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (LookupPrivilegeValueW(NULL, SE_DEBUG_NAME, &tp.Privileges[0].Luid)) {
+            AdjustTokenPrivileges(tok, FALSE, &tp, 0, NULL, NULL);
+        }
+        CloseHandle(tok);
+    }
+
+    fn(enable ? TRUE : FALSE, NULL, FALSE);
+    AppendDebugLog(std::wstring(kStateDir),
+                   enable ? L"[OK]   防杀 | 已标记 Critical Process（强杀=蓝屏）"
+                          : L"[OK]   防杀 | 已解除 Critical Process 标记");
+}
+
+// ------------------------------------------------------------ network block
+// 防火墙规则名固定，恢复 = 按名删除；loopback 流量被 Windows 防火墙天然豁免，
+// 同机测试时控制通道不受影响。
+static bool RunNetsh(const std::wstring& args, const std::wstring& stateDir) {
+    wchar_t sysDir[MAX_PATH];
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    std::wstring cmd = std::wstring(L"\"") + sysDir + L"\\netsh.exe\" " + args;
+    STARTUPINFOW si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessW(NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE,
+                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        AppendDebugLog(stateDir, L"[FAIL] 网络控制 | netsh 拉起失败 err=" +
+                       FormatInt(GetLastError()));
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, 10000);   // netsh 偶发慢，最多等 10s（超时放弃等待，不杀进程）
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0;
+}
+
+bool NetBlockApply(bool block, const std::wstring& stateDir) {
+    // 先按名删除旧规则（幂等；规则不存在时 netsh 返回非零，忽略）
+    RunNetsh(L"advfirewall firewall delete rule name=\"AceGuard_NetBlock_Out\"", stateDir);
+    RunNetsh(L"advfirewall firewall delete rule name=\"AceGuard_NetBlock_In\"", stateDir);
+
+    bool ok = true;
+    if (block) {
+        ok = RunNetsh(L"advfirewall firewall add rule name=\"AceGuard_NetBlock_Out\" "
+                      L"dir=out action=block", stateDir) &&
+             RunNetsh(L"advfirewall firewall add rule name=\"AceGuard_NetBlock_In\" "
+                      L"dir=in action=block", stateDir);
+    }
+
+    AppendDebugLog(stateDir, block
+        ? (ok ? L"[OK]   网络控制 | 断网生效：防火墙出/入站已全阻断（重启电脑自动恢复）"
+              : L"[FAIL] 网络控制 | 断网规则添加失败")
+        : L"[OK]   网络控制 | 阻塞规则已清除（网络恢复；如原本无规则则为空操作）");
+    return ok;
 }
 
 bool WriteTextFileUtf8(const std::wstring& path, const std::wstring& text) {

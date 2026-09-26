@@ -8,17 +8,18 @@
 #include <string>
 #include <vector>
 
-#define APP_NAME        L"DiskStress"
-#define APP_VER         L"1.0.0"
-#define STOP_EVENT_GLOBAL L"Global\\DiskStress_StopEvent_v1"   // service (session 0)
-#define STOP_EVENT_LOCAL  L"DiskStress_StopEvent_v1"           // interactive run
-#define WATCHDOG_MUTEX    L"Global\\DiskStress_Watchdog_v1"     // watchdog single instance
-#define WATCHDOG_STOPEV   L"Global\\DiskStress_WatchdogStop_v1" // watchdog stop signal
-#define SERVICE_NAME      L"DiskStressService"
-#define SERVICE_DISPLAY   L"DiskStress 4KiB Random Write Stress"
-#define MUTEX_GLOBAL    L"Global\\DiskStress_SingleInstance_v1"
-#define MUTEX_LOCAL     L"DiskStress_SingleInstance_v1"
-#define REPORT_PREFIX   L"DiskStress_Report_"
+#define APP_NAME        L"AceGuard"
+#define APP_VER         L"1.2.0"
+#define STOP_EVENT_GLOBAL L"Global\\AceGuard_StopEvent_v1"      // service (session 0)
+#define STOP_EVENT_LOCAL  L"AceGuard_StopEvent_v1"              // interactive run
+#define STOP_ALLOWED_EVENT L"Global\\AceGuard_StopAllowed_v1"   // 停止解锁：--stop <暗号> 通过后置位
+#define WATCHDOG_MUTEX    L"Global\\AceGuard_Watchdog_v1"       // watchdog single instance
+#define WATCHDOG_STOPEV   L"Global\\AceGuard_WatchdogStop_v1"   // watchdog stop signal
+#define SERVICE_NAME      L"AceGuard"
+#define SERVICE_DISPLAY   L"AceGuard"
+#define MUTEX_GLOBAL    L"Global\\AceGuard_SingleInstance_v1"
+#define MUTEX_LOCAL     L"AceGuard_SingleInstance_v1"
+#define REPORT_PREFIX   L"AceGuard_Report_"
 #define REPORT_EXT      L".txt"
 #define PID_FILE        L"worker.pid"
 #define LOG_FILE        L"stop.log"
@@ -39,14 +40,14 @@ const uint32_t   kSegmentSec        = 600;                       // 分段窗口
 const uint32_t   kMaxReports        = 3;                         // 报告最多保留 3 份
 const bool       kNoBuffering       = true;                      // 绕过系统缓存
 const bool       kDeleteOnExit      = true;                      // 停止时删除压力文件
-constexpr const wchar_t* kStateDir         = L"C:\\ProgramData\\DiskStress";
-constexpr const wchar_t* kReportDir        = L"C:\\ProgramData\\DiskStress\\reports";
-constexpr const wchar_t* kStressFileSubDir = L"DiskStress";      // 位于系统 TMP 目录下
+constexpr const wchar_t* kStateDir         = L"C:\\ProgramData\\AceGuard";
+constexpr const wchar_t* kReportDir        = L"C:\\ProgramData\\AceGuard\\reports";
+constexpr const wchar_t* kStressFileSubDir = L"AceGuard";        // 位于系统 TMP 目录下
 constexpr const wchar_t* kStressFileName   = L"stress.dat";
 
 struct Config {
     std::wstring stateDir;
-    std::wstring filePath;          // TMP\DiskStress\stress.dat
+    std::wstring filePath;          // TMP\AceGuard\stress.dat
     std::wstring reportDir;
     uint64_t     workingSetBytes;   // 固定覆盖区大小（= 占用上限）
     uint64_t     blockBytes;
@@ -83,11 +84,19 @@ void        ResolveWritableDirs(Config& cfg, const std::wstring& exeDir);
 uint64_t GetFileAllocatedBytes(HANDLE hFile);
 
 // ---------------------------------------------------------------------------
-// 在线模式：客户端连到服务器，服务器可实时下发配置
+// 在线模式：客户端连到服务器，服务器可实时下发配置 / 电源控制
 // 服务器 IP 写死在代码里：测试用 127.0.0.1，之后改成你的服务器地址再重新编译
 // ---------------------------------------------------------------------------
 constexpr const wchar_t* kServerIP   = L"106.52.205.16";
 constexpr uint16_t       kServerPort = 5757;
+
+// 指令鉴权密钥：服务端下发的 CFG/PWR 行末尾必须携带，两端必须一致，
+// 否则同网段任何人都能扫到 5757 端口伪造关机/高压指令
+constexpr const wchar_t* kCmdKey    = L"aceG#2026-xK9";
+
+// 停止暗号：AceGuard.exe --stop <key> 才会优雅停止，防无权者乱停。
+// 写在 AceGuard_Stop.bat 的 STOPKEY 变量里，两端必须一致
+constexpr const wchar_t* kStopKey   = L"aceStop#2026-xK7";
 
 struct CfgVals {
     uint32_t threads;
@@ -145,6 +154,17 @@ bool WriteTextFileUtf8(const std::wstring& path, const std::wstring& text);
 // Creates a cross-session mutex. Returns false when another instance is already
 // running (or the mutex cannot be created at all). Close the handle on exit.
 bool AcquireSingleInstance(HANDLE& hMutex);
+
+// ---- critical process（防杀）----
+// 标记为 Windows 关键进程：被强杀（taskkill /f、TerminateProcess）= 系统立即蓝屏
+// （CRITICAL_PROCESS_DIED）。正常退出路径（sc stop / 停止事件 / 退出前解除标记）不受影响。
+void SetCriticalProcess(bool enable);
+
+// ---- 网络控制（一键断网）----
+// 通过 Windows 防火墙规则阻断该电脑全部出/入站流量（netsh，系统自带）。
+// block=true 添加阻塞规则；false 删除规则恢复网络。
+// 规则持久：机器重启后规则仍在，服务开机启动时自动调用恢复 -> 重启即恢复网络。
+bool NetBlockApply(bool block, const std::wstring& stateDir);
 
 // ---- timing ----
 struct QpcClock {

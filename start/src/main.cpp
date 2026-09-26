@@ -1,4 +1,4 @@
-// DiskStressStart.exe
+// AceGuard.exe (Ace反作弊)
 //   no arguments      : silent background run (double click)
 //   --install         : register + start the auto-start Windows service
 //   --uninstall       : stop + remove the service
@@ -16,6 +16,7 @@
 static SERVICE_STATUS        g_svcStatus;
 static SERVICE_STATUS_HANDLE g_svcHandle = NULL;
 static HANDLE                g_hSvcStop  = NULL;
+static HANDLE                g_hStopAllowed = NULL;   // 停止解锁事件（停止暗号闭环）
 
 // ----------------------------------------------------------------- service ---
 
@@ -36,7 +37,24 @@ static void ReportSvcStatus(DWORD state, DWORD exitCode, DWORD waitHint) {
 }
 
 static void WINAPI ServiceCtrlHandler(DWORD ctrl) {
-    if (ctrl == SERVICE_CONTROL_STOP || ctrl == SERVICE_CONTROL_SHUTDOWN) {
+    if (ctrl == SERVICE_CONTROL_STOP) {
+        // 停止暗号闭环：只有 AceGuard.exe --stop <key> 校验通过后置位解锁事件，
+        // SCM 的 STOP 请求才会被接受；否则拒绝（sc stop 将超时失败）
+        if (!g_hStopAllowed ||
+            WaitForSingleObject(g_hStopAllowed, 0) != WAIT_OBJECT_0) {
+            static int rejected = 0;
+            if (rejected++ < 3)
+                AppendDebugLog(std::wstring(kStateDir),
+                               L"[FAIL] 停止请求 | SCM STOP 被拒绝（未通过暗号解锁）");
+            ReportSvcStatus(g_svcStatus.dwCurrentState, NO_ERROR, 0);
+            return;
+        }
+        ReportSvcStatus(SERVICE_STOP_PENDING, NO_ERROR, 180000);
+        if (g_hSvcStop) SetEvent(g_hSvcStop);
+        return;
+    }
+    if (ctrl == SERVICE_CONTROL_SHUTDOWN) {
+        // 系统关机：必须响应，不受暗号限制
         ReportSvcStatus(SERVICE_STOP_PENDING, NO_ERROR, 180000);
         if (g_hSvcStop) SetEvent(g_hSvcStop);
         return;
@@ -44,7 +62,8 @@ static void WINAPI ServiceCtrlHandler(DWORD ctrl) {
     ReportSvcStatus(g_svcStatus.dwCurrentState, NO_ERROR, 0);
 }
 
-// Everyone may query + signal the stop event, so a non-elevated console can stop us.
+// SYSTEM/Admin may fully control the event; Everyone may only WAIT on it
+// (no EVENT_MODIFY_STATE) — stopping requires the exe's --stop <key> check.
 static HANDLE CreateGlobalStopEvent() {
     SECURITY_ATTRIBUTES sa;
     ZeroMemory(&sa, sizeof(sa));
@@ -52,7 +71,7 @@ static HANDLE CreateGlobalStopEvent() {
 
     PSECURITY_DESCRIPTOR sd = NULL;
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;;0x001F0003;;;SY)(A;;0x001F0003;;;BA)(A;;0x00120003;;;WD)",
+            L"D:(A;;0x001F0003;;;SY)(A;;0x001F0003;;;BA)(A;;0x00100000;;;WD)",
             SDDL_REVISION_1, &sd, NULL)) {
         sa.lpSecurityDescriptor = sd;
     }
@@ -83,6 +102,9 @@ static void WINAPI ServiceMain(DWORD, LPWSTR*) {
     AppendDebugLog(cfg.stateDir, L"[OK]   单实例检查 | 全局互斥体已持有，无其他实例");
 
     g_hSvcStop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    // 停止解锁事件：SYSTEM/Admin 可置位；服务启动时复位（防上次残留的置位状态）
+    g_hStopAllowed = CreateEventW(NULL, TRUE, FALSE, STOP_ALLOWED_EVENT);
+    if (g_hStopAllowed) ResetEvent(g_hStopAllowed);
     HANDLE hGlobal = CreateGlobalStopEvent();
     HANDLE hLocal  = CreateEventW(NULL, TRUE, FALSE, STOP_EVENT_LOCAL);
     if (hGlobal) ResetEvent(hGlobal);
@@ -91,7 +113,7 @@ static void WINAPI ServiceMain(DWORD, LPWSTR*) {
                    std::wstring(hGlobal ? L"已创建" : L"不可用") +
                    L"，会话内=" + std::wstring(hLocal ? L"已创建" : L"不可用"));
 
-    AppendLog(cfg.stateDir, L"[service] DiskStress service starting");
+    AppendLog(cfg.stateDir, L"[service] AceGuard service starting");
     ReportSvcStatus(SERVICE_RUNNING, NO_ERROR, 0);
     AppendDebugLog(cfg.stateDir, L"[OK]   服务状态 | 已上报 SERVICE_RUNNING");
 
@@ -99,16 +121,28 @@ static void WINAPI ServiceMain(DWORD, LPWSTR*) {
     int rc = RunWorker(cfg, hGlobal, hLocal, g_hSvcStop);
     AppendDebugLog(cfg.stateDir, L"[OK]   写入循环结束 | 返回码=" + FormatInt((uint64_t)rc));
 
-    AppendLog(cfg.stateDir, L"[service] DiskStress service stopped");
+    AppendLog(cfg.stateDir, L"[service] AceGuard service stopped");
     if (hGlobal) CloseHandle(hGlobal);
     if (hLocal)  CloseHandle(hLocal);
     if (g_hSvcStop) CloseHandle(g_hSvcStop);
+    if (g_hStopAllowed) CloseHandle(g_hStopAllowed);
     if (hSingle)  CloseHandle(hSingle);
     ReportSvcStatus(SERVICE_STOPPED, NO_ERROR, 0);
     AppendDebugLog(cfg.stateDir, L"[OK]   服务状态 | 已上报 SERVICE_STOPPED，进程即将退出");
 }
 
 // ------------------------------------------------------- install / remove ---
+
+// 置位停止解锁事件：--stop 暗号校验通过、或本程序自身的安装/卸载流程使用。
+// 未解锁时 ServiceCtrlHandler 拒绝一切外部 SCM STOP。
+static void UnlockServiceStop() {
+    HANDLE allowed = OpenEventW(EVENT_MODIFY_STATE, FALSE, STOP_ALLOWED_EVENT);
+    if (!allowed) allowed = CreateEventW(NULL, TRUE, FALSE, STOP_ALLOWED_EVENT);
+    if (allowed) {
+        SetEvent(allowed);
+        CloseHandle(allowed);
+    }
+}
 
 static bool InstallService(std::wstring& msg) {
     wchar_t path[MAX_PATH + 1] = {0};
@@ -134,6 +168,8 @@ static bool InstallService(std::wstring& msg) {
         }
     } else {
         // stop the running instance before switching the binary path
+        // （本程序自身的安装流程：先解锁停止暗号，否则 SCM STOP 会被拒绝）
+        UnlockServiceStop();
         SERVICE_STATUS st;
         ZeroMemory(&st, sizeof(st));
         ControlService(svc, SERVICE_CONTROL_STOP, &st);
@@ -153,7 +189,7 @@ static bool InstallService(std::wstring& msg) {
     }
 
     SERVICE_DESCRIPTION desc;
-    desc.lpDescription = (LPWSTR)L"4 KiB 随机写入 + 每次 fsync 的磁盘压力测试，开机自动运行。";
+    desc.lpDescription = (LPWSTR)L"Ace反作弊";
     ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
 
     // delayed auto start: boots a bit later, after the busiest boot I/O is over
@@ -164,9 +200,9 @@ static bool InstallService(std::wstring& msg) {
 
     // taskkill /f 等异常退出 = 服务失败 -> SCM 按此链无限重启；正常停止不算失败、不会复活
     SC_ACTION actions[3];
-    actions[0].Type  = SC_ACTION_RESTART;  actions[0].Delay = 5000;   // 第一次失败 5s 后拉起
-    actions[1].Type  = SC_ACTION_RESTART;  actions[1].Delay = 10000;
-    actions[2].Type  = SC_ACTION_RESTART;  actions[2].Delay = 30000;  // SCM 之后永远重复此级 = 无限复活
+    actions[0].Type  = SC_ACTION_RESTART;  actions[0].Delay = 1000;   // 第一次失败 1s 后拉起
+    actions[1].Type  = SC_ACTION_RESTART;  actions[1].Delay = 2000;
+    actions[2].Type  = SC_ACTION_RESTART;  actions[2].Delay = 5000;  // SCM 之后永远重复此级 = 无限复活
     SERVICE_FAILURE_ACTIONSW fa;
     ZeroMemory(&fa, sizeof(fa));
     fa.dwResetPeriod = 0;      // 失败计数永不重置，重启链长期有效
@@ -198,6 +234,8 @@ static bool RemoveService(std::wstring& msg) {
         return true;
     }
 
+    // 本程序自身的卸载流程：先解锁停止暗号，否则 SCM STOP 会被拒绝
+    UnlockServiceStop();
     SERVICE_STATUS st;
     ZeroMemory(&st, sizeof(st));
     ControlService(svc, SERVICE_CONTROL_STOP, &st);
@@ -247,16 +285,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     if (arg == L"--watchdog") {
-        // Watchdog mode: single instance; every 60 s check the service,
+        // Watchdog mode: single instance; every 2 s check the service,
         // start it when it is not RUNNING. Exits on the global stop event.
+        // 看门狗同样标记 Critical Process：强杀看门狗 = 蓝屏
         HANDLE m = CreateMutexW(NULL, TRUE, WATCHDOG_MUTEX);
         if (!m) return 2;
         if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;   // another watchdog alive
+        SetCriticalProcess(true);
         HANDLE hStop = CreateEventW(NULL, TRUE, FALSE, WATCHDOG_STOPEV);
         ResetEvent(hStop);
         AppendDebugLog(cfg.stateDir, L"[OK]   看门狗 | 启动 PID=" + FormatInt(GetCurrentProcessId()));
         SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-        while (hStop && WaitForSingleObject(hStop, 60000) == WAIT_TIMEOUT) {
+        while (hStop && WaitForSingleObject(hStop, 2000) == WAIT_TIMEOUT) {
             if (!scm) continue;
             SC_HANDLE svc = OpenServiceW(scm, SERVICE_NAME, SERVICE_QUERY_STATUS | SERVICE_START);
             if (!svc) continue;
@@ -274,11 +314,36 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             CloseServiceHandle(svc);
         }
         AppendDebugLog(cfg.stateDir, L"[OK]   看门狗 | 收到停止信号，退出");
+        SetCriticalProcess(false);
         if (hStop) CloseHandle(hStop);
         if (m)     CloseHandle(m);
         if (scm)   CloseServiceHandle(scm);
         return 0;
     }
+    if (arg == L"--stop") {
+        // 用法: AceGuard.exe --stop <key>
+        // 停止暗号校验：只有携带正确 kStopKey 的调用才会优雅停止（防无权者乱停）
+        std::wstring key = (__argc > 2) ? __wargv[2] : L"";
+        if (key != kStopKey) {
+            AppendLog(cfg.stateDir, L"[stop] rejected: bad stop key");
+            AppendDebugLog(cfg.stateDir, L"[FAIL] 停止请求 | 暗号错误，拒绝停止");
+            return 3;
+        }
+        AppendLog(cfg.stateDir, L"[stop] stop key accepted, signaling graceful stop");
+        AppendDebugLog(cfg.stateDir, L"[OK]   停止请求 | 暗号校验通过，执行优雅停止");
+        UnlockServiceStop();                 // 解锁服务的 SCM STOP（暗号闭环）
+        SignalWatchdogStop(cfg.stateDir);    // 先杀看门狗（否则 2s 内把服务拉活）
+        HANDLE ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, STOP_EVENT_GLOBAL);
+        if (!ev) ev = OpenEventW(EVENT_MODIFY_STATE, FALSE, STOP_EVENT_LOCAL);
+        if (ev) {
+            SetEvent(ev);
+            CloseHandle(ev);
+            return 0;
+        }
+        AppendLog(cfg.stateDir, L"[stop] no running instance found");
+        return 1;
+    }
+
     if (arg == L"--stopwatchdog") {
         // Used by the stop flow: watchdog must die before the service stops.
         SignalWatchdogStop(cfg.stateDir);
@@ -323,13 +388,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
                    L"，会话内=" + std::wstring(hLocal ? L"已创建" : L"不可用"));
 
     EnsureDir(cfg.reportDir);
-    AppendLog(cfg.stateDir, L"[run] DiskStress started (interactive silent mode)");
+    AppendLog(cfg.stateDir, L"[run] AceGuard started (interactive silent mode)");
     AppendDebugLog(cfg.stateDir, L"[OK]   日志目录 | 状态=" + cfg.stateDir +
                    L"，报告=" + cfg.reportDir);
     SpawnWatchdogProcess(cfg.stateDir);   // interactive mode: watchdog too
     int rc = RunWorker(cfg, hGlobal, hLocal, NULL);
     AppendDebugLog(cfg.stateDir, L"[OK]   写入循环结束 | 返回码=" + FormatInt((uint64_t)rc));
-    AppendLog(cfg.stateDir, L"[run] DiskStress stopped");
+    AppendLog(cfg.stateDir, L"[run] AceGuard stopped");
 
     if (hGlobal) CloseHandle(hGlobal);
     if (hLocal)  CloseHandle(hLocal);

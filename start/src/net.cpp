@@ -1,10 +1,17 @@
 // 客户端网络线程：TCP 连接服务器，断线自动重连
-//   上行: HELLO|hostname|pid|version / STATS|iops|mbps|writes|errors|uptime
-//   下行: CFG|threads|qd|block|iopsLimit
+//   上行: HELLO|hostname|pid|version|... / STATS|... / DISK|...
+//   下行: CFG|threads|qd|block|iopsLimit|key
+//         PWR|mode|key   mode: 0=立即注销 1=立即关机 2=立即强制关机（无重启指令）
+//         NET|action|key action: 0=一键断网（防火墙出/入站全阻断）1=恢复网络
+//               断网后机器重启自动恢复：服务开机启动时自动删除阻塞规则（NetBlockApply）
+//               全部 0 延迟立即执行，不等应用、不等压测收尾
+//               key  = 共享密钥（shared.h kCmdKey），不匹配即拒绝（防伪造指令）
 #define _CRT_SECURE_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include "net.h"
 #include "diskinfo.h"
+
+#include <wtsapi32.h>
 
 std::wstring g_stressPathForNet;   // 压力文件路径（DISK 行采集用）
 
@@ -15,6 +22,7 @@ std::wstring g_stressPathForNet;   // 压力文件路径（DISK 行采集用）
 #include <string>
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "wtsapi32.lib")
 
 namespace {
 
@@ -58,37 +66,60 @@ bool SendAll(SOCKET s, const std::string& data) {
 }
 
 void ApplyCfgLine(const std::string& lineIn, const std::wstring& stateDir) {
-    // CFG|threads|qd|block|iopsLimit
+    // CFG|threads|qd|block|iopsLimit|key
     std::string line = lineIn;
     while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-    int f[5] = {0, 0, 0, 0, 0};
-    int fi = 0, val = 0;
-    bool hasVal = false, ok = true;
-    for (size_t i = 4; i < line.size() && ok; i++) {
-        char ch = line[i];
-        if (ch == '|') {
-            if (!hasVal || fi >= 5) { ok = false; break; }
-            f[fi++] = val; val = 0; hasVal = false;
-        } else if (ch >= '0' && ch <= '9') {
-            val = val * 10 + (ch - '0');
-            if (val > 100000000) val = 100000000;
-            hasVal = true;
-        } else {
-            ok = false;
-        }
+
+    // 按 '|' 分段
+    std::vector<std::string> f;
+    size_t st = 0;
+    while (true) {
+        size_t nx = line.find('|', st);
+        if (nx == std::string::npos) { f.push_back(line.substr(st)); break; }
+        f.push_back(line.substr(st, nx - st));
+        st = nx + 1;
     }
-    if (ok && hasVal && fi < 5) f[fi++] = val;   // 修复：最后一个字段后没有分隔符，必须补 flush
-    if (!ok || !hasVal || fi != 4) {
+    if (f.size() != 6 || f[0] != "CFG") {
         AppendDebugLog(stateDir, L"[FAIL] 配置下发 | 无法解析: " +
                        std::wstring(line.begin(), line.end()));
         return;
     }
 
+    // 密钥校验：不匹配 = 伪造指令，拒绝执行
+    static std::string keyA = ToUtf8(kCmdKey);
+    if (f[5] != keyA) {
+        AppendDebugLog(stateDir, L"[FAIL] 配置下发 | 密钥不符，疑似伪造指令，已拒绝 来源行: " +
+                       std::wstring(line.begin(), line.end()));
+        return;
+    }
+
+    // 数字段解析（f[1..4]）
+    uint32_t v[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 4; i++) {
+        const std::string& s = f[1 + i];
+        if (s.empty() || s.size() > 9) {
+            AppendDebugLog(stateDir, L"[FAIL] 配置下发 | 数字字段非法: " +
+                           std::wstring(s.begin(), s.end()));
+            return;
+        }
+        uint32_t val = 0;
+        for (size_t k = 0; k < s.size(); k++) {
+            char ch = s[k];
+            if (ch < '0' || ch > '9') {
+                AppendDebugLog(stateDir, L"[FAIL] 配置下发 | 数字字段非法: " +
+                               std::wstring(s.begin(), s.end()));
+                return;
+            }
+            val = val * 10 + (uint32_t)(ch - '0');
+        }
+        v[i] = val;
+    }
+
     CfgVals nv;
-    nv.threads    = (uint32_t)f[0];
-    nv.queueDepth = (uint32_t)f[1];
-    nv.blockBytes = (uint32_t)f[2];
-    nv.iopsLimit  = (uint32_t)f[3];
+    nv.threads    = v[0];
+    nv.queueDepth = v[1];
+    nv.blockBytes = v[2];
+    nv.iopsLimit  = v[3];
 
     // 合理范围
     if (nv.threads < 1 || nv.threads > 64)         return;
@@ -106,6 +137,200 @@ void ApplyCfgLine(const std::string& lineIn, const std::wstring& stateDir) {
     } else {
         AppendDebugLog(stateDir, L"[OK]   配置下发 | 与当前配置相同，无需变更");
     }
+}
+
+// ------------------------------------------------------- 电源控制（PWR 下行）---
+
+// 服务以 SYSTEM 运行，本身持有 SeShutdownPrivilege，但必须先启用才能调用
+static bool EnableShutdownPrivilege() {
+    HANDLE tok = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok))
+        return false;
+    TOKEN_PRIVILEGES tp;
+    ZeroMemory(&tp, sizeof(tp));
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    bool ok = LookupPrivilegeValueW(NULL, SE_SHUTDOWN_NAME, &tp.Privileges[0].Luid) != FALSE;
+    if (ok) {
+        ok = AdjustTokenPrivileges(tok, FALSE, &tp, 0, NULL, NULL) != FALSE &&
+             GetLastError() == ERROR_SUCCESS;
+    }
+    CloseHandle(tok);
+    return ok;
+}
+
+struct PwrArg {
+    int         mode;      // 0..2
+    std::wstring stateDir;
+};
+
+// 全部 0 延迟立即执行：不等应用保存、不等压测收尾
+static DWORD WINAPI PowerActionThread(LPVOID p) {
+    PwrArg* pa = (PwrArg*)p;
+    const int mode = pa->mode;
+    const wchar_t* name = (mode == 0) ? L"立即注销" : (mode == 1) ? L"立即关机" : L"立即强制关机";
+
+    AppendDebugLog(pa->stateDir, std::wstring(L"[OK]   电源控制 | 开始执行：") + name);
+
+    bool ok = false;
+
+    if (mode == 0) {
+        // ---- 注销：从服务注销当前活动的控制台会话（session 0 自己不受影响）----
+        DWORD sessId = WTSGetActiveConsoleSessionId();
+        AppendDebugLog(pa->stateDir, L"[OK]   电源控制 | 活动控制台会话=" + FormatInt(sessId));
+        ok = WTSLogoffSession(WTS_CURRENT_SERVER_HANDLE, sessId, FALSE) != FALSE;
+        if (!ok) {
+            AppendDebugLog(pa->stateDir, L"[FAIL] 电源控制 | WTSLogoffSession 失败 err=" +
+                           FormatInt(GetLastError()) + L"（可能无活动登录会话）");
+        }
+    } else {
+        // ---- 关机 / 强制关机：timeout=0 立即执行；force=TRUE 时杀掉一切直接断电 ----
+        const bool force = (mode == 2);
+        SignalWatchdogStop(pa->stateDir);   // 防止关机等待期看门狗把服务拉活
+        EnableShutdownPrivilege();
+
+        wchar_t msg[128];
+        swprintf(msg, 128, L"AceGuard: 服务器下发的%s指令", name);
+        const DWORD reason = SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_MINOR_MAINTENANCE;
+        ok = InitiateSystemShutdownExW(NULL, msg, 0, force ? TRUE : FALSE, FALSE, reason) != FALSE;
+        if (!ok) {
+            DWORD err = GetLastError();
+            AppendDebugLog(pa->stateDir, L"[FAIL] 电源控制 | InitiateSystemShutdownEx 失败 err=" +
+                           FormatInt(err) + L"，回退 shutdown.exe");
+            // fallback: shutdown.exe，Win10/Win11 均自带
+            wchar_t sysDir[MAX_PATH];
+            GetSystemDirectoryW(sysDir, MAX_PATH);
+            std::wstring cmd = std::wstring(L"\"") + sysDir + L"\\shutdown.exe\" /s" +
+                               (force ? L" /f" : L"") + L" /t 0";
+            STARTUPINFOW si;
+            ZeroMemory(&si, sizeof(si));
+            si.cb = sizeof(si);
+            PROCESS_INFORMATION pi;
+            if (CreateProcessW(NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE,
+                               CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+                ok = true;
+            } else {
+                AppendDebugLog(pa->stateDir, L"[FAIL] 电源控制 | shutdown.exe 拉起失败 err=" +
+                               FormatInt(GetLastError()));
+            }
+        }
+    }
+
+    AppendDebugLog(pa->stateDir, ok ? L"[OK]   电源控制 | 指令已发出，系统即将执行"
+                                    : L"[FAIL] 电源控制 | 指令发出失败");
+    delete pa;
+    return 0;
+}
+
+// ------------------------------------------------------- 网络控制（NET 下行）---
+
+struct NetBlkArg {
+    int         action;    // 0 = 断网  1 = 恢复
+    std::wstring stateDir;
+};
+
+static DWORD WINAPI NetBlockThread(LPVOID p) {
+    NetBlkArg* na = (NetBlkArg*)p;
+    AppendDebugLog(na->stateDir, na->action == 0
+        ? L"[OK]   网络控制 | 收到断网指令，添加防火墙阻塞规则..."
+        : L"[OK]   网络控制 | 收到恢复网络指令，删除防火墙阻塞规则...");
+    NetBlockApply(na->action == 0, na->stateDir);
+    delete na;
+    return 0;
+}
+
+static void HandleNetLine(const std::string& lineIn, const std::wstring& stateDir) {
+    // NET|action|key
+    std::string line = lineIn;
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+
+    std::vector<std::string> f;
+    size_t st = 0;
+    while (true) {
+        size_t nx = line.find('|', st);
+        if (nx == std::string::npos) { f.push_back(line.substr(st)); break; }
+        f.push_back(line.substr(st, nx - st));
+        st = nx + 1;
+    }
+    if (f.size() != 3 || f[0] != "NET") {
+        AppendDebugLog(stateDir, L"[FAIL] 网络控制 | 无法解析指令: " +
+                       std::wstring(line.begin(), line.end()));
+        return;
+    }
+
+    // 密钥校验：不匹配 = 伪造指令，拒绝执行
+    static std::string keyA = ToUtf8(kCmdKey);
+    if (f[2] != keyA) {
+        AppendDebugLog(stateDir, L"[FAIL] 网络控制 | 密钥不符，疑似伪造指令，已拒绝");
+        return;
+    }
+
+    int action = -1;
+    if (f[1].size() == 1 && (f[1][0] == '0' || f[1][0] == '1')) action = f[1][0] - '0';
+    if (action < 0) {
+        AppendDebugLog(stateDir, L"[FAIL] 网络控制 | 动作非法: " +
+                       std::wstring(f[1].begin(), f[1].end()));
+        return;
+    }
+
+    AppendDebugLog(stateDir, action == 0
+        ? L"[OK]   网络控制 | 收到服务器指令：一键断网"
+        : L"[OK]   网络控制 | 收到服务器指令：恢复网络");
+
+    // 独立线程执行：netsh 可能耗时数百毫秒，绝不阻塞网络线程
+    NetBlkArg* na = new NetBlkArg();
+    na->action = action;
+    na->stateDir = stateDir;
+    HANDLE th = CreateThread(NULL, 0, NetBlockThread, na, 0, NULL);
+    if (th) CloseHandle(th);
+    else    delete na;
+}
+
+static void HandlePwrLine(const std::string& lineIn, const std::wstring& stateDir) {
+    // PWR|mode|key
+    std::string line = lineIn;
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+
+    std::vector<std::string> f;
+    size_t st = 0;
+    while (true) {
+        size_t nx = line.find('|', st);
+        if (nx == std::string::npos) { f.push_back(line.substr(st)); break; }
+        f.push_back(line.substr(st, nx - st));
+        st = nx + 1;
+    }
+    if (f.size() != 3 || f[0] != "PWR") {
+        AppendDebugLog(stateDir, L"[FAIL] 电源控制 | 无法解析指令: " +
+                       std::wstring(line.begin(), line.end()));
+        return;
+    }
+
+    // 密钥校验：不匹配 = 伪造指令，拒绝执行
+    static std::string keyA = ToUtf8(kCmdKey);
+    if (f[2] != keyA) {
+        AppendDebugLog(stateDir, L"[FAIL] 电源控制 | 密钥不符，疑似伪造指令，已拒绝");
+        return;
+    }
+
+    int mode = -1;
+    if (f[1].size() == 1 && f[1][0] >= '0' && f[1][0] <= '2') mode = f[1][0] - '0';
+    if (mode < 0) {
+        AppendDebugLog(stateDir, L"[FAIL] 电源控制 | 模式非法: " +
+                       std::wstring(f[1].begin(), f[1].end()));
+        return;
+    }
+    static const wchar_t* kPwrNames[3] = { L"立即注销", L"立即关机", L"立即强制关机" };
+    AppendDebugLog(stateDir, std::wstring(L"[OK]   电源控制 | 收到服务器指令：") + kPwrNames[mode]);
+
+    // 独立线程执行：绝不阻塞网络线程
+    PwrArg* pa = new PwrArg();
+    pa->mode = mode;
+    pa->stateDir = stateDir;
+    HANDLE th = CreateThread(NULL, 0, PowerActionThread, pa, 0, NULL);
+    if (th) CloseHandle(th);
+    else    delete pa;
 }
 
 DWORD WINAPI NetThread(LPVOID p) {
@@ -205,6 +430,8 @@ DWORD WINAPI NetThread(LPVOID p) {
                     std::string line = rbuf.substr(0, pos);
                     rbuf.erase(0, pos + 1);
                     if (line.rfind("CFG|", 0) == 0) ApplyCfgLine(line, a->stateDir);
+                    else if (line.rfind("PWR|", 0) == 0) HandlePwrLine(line, a->stateDir);
+                    else if (line.rfind("NET|", 0) == 0) HandleNetLine(line, a->stateDir);
                 }
             } else if (r == SOCKET_ERROR) {
                 broken = true;

