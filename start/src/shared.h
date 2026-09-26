@@ -160,11 +160,13 @@ bool AcquireSingleInstance(HANDLE& hMutex);
 // （CRITICAL_PROCESS_DIED）。正常退出路径（sc stop / 停止事件 / 退出前解除标记）不受影响。
 void SetCriticalProcess(bool enable);
 
-// ---- 网络控制（一键断网）----
-// 通过 Windows 防火墙规则阻断该电脑全部出/入站流量（netsh，系统自带）。
-// block=true 添加阻塞规则；false 删除规则恢复网络。
-// 规则持久：机器重启后规则仍在，服务开机启动时自动调用恢复 -> 重启即恢复网络。
-bool NetBlockApply(bool block, const std::wstring& stateDir);
+// ---- 网络控制（一键断网：网卡级禁用，不依赖防火墙/杀软）----
+// block=true：禁用全部物理网卡（以太网 IF6 + Wi-Fi IF71），LUID 记入 stateDir\netblock.ini
+//             幂等：已禁用的跳过；每次下发都重新枚举当前启用的网卡（支持不重启重复断网）
+// block=false：仅恢复清单中记录的网卡（服务启动自愈 / 运行中恢复指令），
+//              不碰用户手动禁用的网卡
+// 自愈模型：断网后目标机重启 -> 服务开机自启读清单恢复 -> 重启即恢复网络，零人工
+bool NetBlockNicApply(bool block, const std::wstring& stateDir);
 
 // ---- timing ----
 struct QpcClock {

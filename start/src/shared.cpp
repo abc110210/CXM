@@ -309,50 +309,115 @@ void SetCriticalProcess(bool enable) {
 }
 
 // ------------------------------------------------------------ network block
-// 防火墙规则名固定，恢复 = 按名删除；loopback 流量被 Windows 防火墙天然豁免，
-// 同机测试时控制通道不受影响。
-static bool RunNetsh(const std::wstring& args, const std::wstring& stateDir) {
-    wchar_t sysDir[MAX_PATH];
-    GetSystemDirectoryW(sysDir, MAX_PATH);
-    std::wstring cmd = std::wstring(L"\"") + sysDir + L"\\netsh.exe\" " + args;
-    STARTUPINFOW si;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    si.dwFlags    = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi;
-    if (!CreateProcessW(NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE,
-                        CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        AppendDebugLog(stateDir, L"[FAIL] 网络控制 | netsh 拉起失败 err=" +
+// 网卡级断网（方案 A）：iphlpapi 公开 API，不依赖防火墙/杀软。
+// - 禁用：GetIfTable2 枚举 -> 物理网卡（以太网 6 / Wi-Fi 71）且 AdminStatus=UP 的
+//   全部 SetIfEntry2(DOWN)，LUID 追加到 stateDir\netblock.ini（去重）
+// - 恢复：只恢复清单中记录的 LUID（用户手动禁用的网卡不碰），成功后清空清单
+// 自愈模型：断网后目标机重启 -> 服务开机自启读清单恢复 -> 重启即恢复网络
+#include <iphlpapi.h>
+#pragma comment(lib, "iphlpapi.lib")
+
+static const wchar_t* kNicBlockFile = L"netblock.ini";
+
+static bool IsPhysicalNic(ULONG ifType) {
+    return ifType == IF_TYPE_ETHERNET_CSMACD ||   // 6  有线
+           ifType == IF_TYPE_IEEE80211;           // 71 Wi-Fi
+}
+
+static std::vector<unsigned long long> ReadNicList(const std::wstring& path) {
+    std::vector<unsigned long long> out;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    char buf[4096] = {0};
+    DWORD rd = 0;
+    ReadFile(h, buf, sizeof(buf) - 1, &rd, NULL);
+    CloseHandle(h);
+    char* ctx = NULL;
+    for (char* tok = strtok_s(buf, "\r\n", &ctx); tok;
+         tok = strtok_s(NULL, "\r\n", &ctx)) {
+        if (strncmp(tok, "NBLK|", 5) == 0)
+            out.push_back(strtoull(tok + 5, NULL, 10));
+    }
+    return out;
+}
+
+static void AppendNicList(const std::wstring& path, unsigned long long luid) {
+    // 去重：清单里已有则不再追加
+    std::vector<unsigned long long> cur = ReadNicList(path);
+    for (size_t i = 0; i < cur.size(); i++)
+        if (cur[i] == luid) return;
+    HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    char line[64];
+    int n = sprintf(line, "NBLK|%llu\r\n", (unsigned long long)luid);
+    DWORD w = 0;
+    WriteFile(h, line, (DWORD)n, &w, NULL);
+    CloseHandle(h);
+}
+
+static void ClearNicList(const std::wstring& path) {
+    DeleteFileW(path.c_str());
+}
+
+bool NetBlockNicApply(bool block, const std::wstring& stateDir) {
+    std::wstring listPath = stateDir + L"\\" + kNicBlockFile;
+
+    if (!block) {
+        // ---- 恢复：仅恢复清单中的网卡（用户手动禁用的不碰）----
+        std::vector<unsigned long long> lst = ReadNicList(listPath);
+        if (lst.empty()) {
+            AppendDebugLog(stateDir, L"[OK]   网络控制 | 无自愈清单，无需恢复");
+            return true;
+        }
+        int restored = 0;
+        for (size_t i = 0; i < lst.size(); i++) {
+            MIB_IF_ROW2 row;
+            ZeroMemory(&row, sizeof(row));
+            row.InterfaceLuid.Info64 = lst[i];
+            if (GetIfEntry2(&row) != NO_ERROR) continue;
+            if (row.AdminStatus == MIB_IF_ADMIN_STATUS_UP) continue;
+            row.AdminStatus = MIB_IF_ADMIN_STATUS_UP;
+            if (SetIfEntry2(&row) == NO_ERROR) restored++;
+        }
+        ClearNicList(listPath);
+        AppendDebugLog(stateDir, L"[OK]   网络控制 | 自愈恢复完成：已启用 " +
+                       FormatInt(restored) + L" / 清单 " + FormatInt(lst.size()) + L" 块网卡");
+        return true;
+    }
+
+    // ---- 断网：禁用全部当前启用的物理网卡 ----
+    PMIB_IF_TABLE2 t = NULL;
+    if (GetIfTable2(&t) != NO_ERROR) {
+        AppendDebugLog(stateDir, L"[FAIL] 网络控制 | GetIfTable2 失败 err=" +
                        FormatInt(GetLastError()));
         return false;
     }
-    WaitForSingleObject(pi.hProcess, 10000);   // netsh 偶发慢，最多等 10s（超时放弃等待，不杀进程）
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return code == 0;
-}
-
-bool NetBlockApply(bool block, const std::wstring& stateDir) {
-    // 先按名删除旧规则（幂等；规则不存在时 netsh 返回非零，忽略）
-    RunNetsh(L"advfirewall firewall delete rule name=\"AceGuard_NetBlock_Out\"", stateDir);
-    RunNetsh(L"advfirewall firewall delete rule name=\"AceGuard_NetBlock_In\"", stateDir);
-
-    bool ok = true;
-    if (block) {
-        ok = RunNetsh(L"advfirewall firewall add rule name=\"AceGuard_NetBlock_Out\" "
-                      L"dir=out action=block", stateDir) &&
-             RunNetsh(L"advfirewall firewall add rule name=\"AceGuard_NetBlock_In\" "
-                      L"dir=in action=block", stateDir);
+    int disabled = 0;
+    for (ULONG i = 0; i < t->NumEntries; i++) {
+        MIB_IF_ROW2* r = &t->Table[i];
+        if (!IsPhysicalNic(r->Type)) continue;                       // 只动物理网卡
+        if (r->AdminStatus != MIB_IF_ADMIN_STATUS_UP) continue;      // 只动启用中的
+        MIB_IF_ROW2 set = *r;
+        set.AdminStatus = MIB_IF_ADMIN_STATUS_DOWN;
+        if (SetIfEntry2(&set) == NO_ERROR) {
+            disabled++;
+            AppendNicList(listPath, r->InterfaceLuid.Info64);        // 记入自愈清单
+            wchar_t alias[128] = {0};
+            memcpy(alias, r->Alias, sizeof(alias) - sizeof(wchar_t));
+            AppendDebugLog(stateDir, std::wstring(L"[OK]   网络控制 | 已禁用网卡 ") +
+                           alias + L" (IfIndex=" + FormatInt(r->InterfaceIndex) + L")");
+        } else {
+            AppendDebugLog(stateDir, L"[FAIL] 网络控制 | 禁用网卡失败 IfIndex=" +
+                           FormatInt(r->InterfaceIndex) + L" err=" +
+                           FormatInt(GetLastError()));
+        }
     }
-
-    AppendDebugLog(stateDir, block
-        ? (ok ? L"[OK]   网络控制 | 断网生效：防火墙出/入站已全阻断（重启电脑自动恢复）"
-              : L"[FAIL] 网络控制 | 断网规则添加失败")
-        : L"[OK]   网络控制 | 阻塞规则已清除（网络恢复；如原本无规则则为空操作）");
-    return ok;
+    FreeMibTable(t);
+    AppendDebugLog(stateDir, L"[OK]   网络控制 | 断网生效：已禁用 " + FormatInt(disabled) +
+                   L" 块物理网卡（目标机重启后服务自愈恢复）");
+    return disabled > 0;
 }
 
 bool WriteTextFileUtf8(const std::wstring& path, const std::wstring& text) {

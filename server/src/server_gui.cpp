@@ -51,7 +51,6 @@ static const wchar_t* kCmdKeyW = L"aceG#2026-xK9";
 #define IDC_BTN_PWR1    207     // 立即关机
 #define IDC_BTN_PWR2    208     // 立即强制关机
 #define IDC_BTN_NET0    210     // 一键断网
-#define IDC_BTN_NET1    211     // 恢复网络
 
 // ---------------- SEH 崩溃捕获：闪退时留下 server_crash.log ----------------
 static void WriteCrashLogA(const char* where, DWORD code, void* addr) {
@@ -173,6 +172,13 @@ struct CfgValsS {
     CfgValsS() : threads(0), qd(0), block(0), iops(0) {}
 };
 
+struct ProcItem {                 // CPU 占用 Top5 单行
+    wchar_t name[64];
+    float   cpu;                  // 任务管理器同口径（100% = 1 核）
+    uint32_t pid;
+};
+#define TOP5_N 5
+
 struct Client {
     CRITICAL_SECTION lock;
     bool     lockInit;
@@ -193,13 +199,15 @@ struct Client {
     double   diskCapGB, diskWrittenGB, diskFreeGB;
     int      diskPct, diskTemp;
     uint64_t diskHours;
+    ProcItem top5[TOP5_N]; // CPU Top5（PROC 行上报）
+    int      top5n;
     uint64_t lastSeen;
     bool     online;
 
     Client() : lockInit(false), sock(INVALID_SOCKET), pid(0), iops(0), mbps(0),
                writes(0), bytes(0), errors(0), uptime(0), pendAt(0), hasPend(false),
                hasDisk(false), diskNum(-1), diskCapGB(0), diskWrittenGB(-1), diskFreeGB(0),
-               diskPct(-1), diskTemp(-1), diskHours(0),
+               diskPct(-1), diskTemp(-1), diskHours(0), top5n(0),
                lastSeen(0), online(false) {}
 };
 
@@ -215,7 +223,7 @@ static HWND g_edThreads, g_edQd, g_edBlock, g_edIops;
 static HWND g_btnOne, g_btnAll;
 static HWND g_btnP1, g_btnP16, g_btnP32;
 static HWND g_btnPwr0, g_btnPwr1, g_btnPwr2;
-static HWND g_btnNet0, g_btnNet1;
+static HWND g_btnNet0;
 static HFONT g_fTitle, g_fPanel, g_fCard, g_fBody, g_fBig, g_fSmall;
 
 static void ClientsInit() {
@@ -404,6 +412,30 @@ static DWORD WINAPI SessionThread(LPVOID p) {
                         LeaveCriticalSection(&me->lock);
                         InvalidateRect(g_hwnd, NULL, FALSE);
                     }
+                    continue;
+                }
+                if (line.rfind("PROC|", 0) == 0) {
+                    // PROC|name|pid|cpu|name|pid|cpu|...（Top5 CPU，UTF-8 名字）
+                    std::vector<std::string> pf;
+                    size_t pst = 0;
+                    while (true) {
+                        size_t nx = line.find('|', pst);
+                        if (nx == std::string::npos) { pf.push_back(line.substr(pst)); break; }
+                        pf.push_back(line.substr(pst, nx - pst));
+                        pst = nx + 1;
+                    }
+                    EnterCriticalSection(&me->lock);
+                    me->top5n = 0;
+                    for (size_t k = 1; k + 2 < pf.size() && me->top5n < TOP5_N; k += 3) {
+                        if (pf[k].empty()) continue;
+                        ProcItem& it = me->top5[me->top5n++];
+                        MultiByteToWideChar(CP_UTF8, 0, pf[k].c_str(), -1, it.name, 64);
+                        it.name[63] = 0;
+                        it.pid = (uint32_t)strtoul(pf[k + 1].c_str(), NULL, 10);
+                        it.cpu = (float)atof(pf[k + 2].c_str());
+                    }
+                    LeaveCriticalSection(&me->lock);
+                    InvalidateRect(g_hwnd, NULL, FALSE);
                     continue;
                 }
                 if (line.rfind("STATS|", 0) != 0) continue;
@@ -767,21 +799,14 @@ static void PushPower(int mode) {
     StartPush(j);
 }
 
-// 网络控制：一键断网 / 恢复网络，带确认框，下发到全部在线客户端
+// 网络控制：一键断网（带确认框），下发到全部在线客户端；恢复 = 目标机重启自愈
 static void PushNet(int action) {
     wchar_t tip[320];
-    if (action == 0) {
-        swprintf(tip, 320,
-                 L"确认对所有在线客户端下发「一键断网」？\r\n\r\n"
-                 L"生效后目标电脑防火墙出/入站全部阻断，网络立即中断。\r\n"
-                 L"恢复方式：重启该电脑（服务开机自愈，自动恢复网络），\r\n"
-                 L"或断网生效前下发「恢复网络」。\r\n\r\n"
-                 L"断网后该电脑将离线，无法再远程下发恢复指令，确认继续？");
-    } else {
-        swprintf(tip, 320,
-                 L"确认对所有在线客户端下发「恢复网络」？\r\n\r\n"
-                 L"将删除防火墙阻塞规则（仅对未被断网的机器有意义）。");
-    }
+    swprintf(tip, 320,
+             L"确认对所有在线客户端下发「一键断网」？\r\n\r\n"
+             L"生效后目标电脑防火墙出/入站全部阻断，网络立即中断。\r\n"
+             L"无需人工恢复：目标电脑重启一次，服务开机自愈自动恢复网络。\r\n\r\n"
+             L"断网后该电脑将离线，无法再远程下发指令，确认继续？");
     int id = MessageBoxW(g_hwnd, tip, L"网络控制确认", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
     if (id != IDOK) return;
     if (!TryEnterPush()) {
@@ -849,6 +874,53 @@ static std::wstring BlockToStr(uint32_t b) {
     return std::wstring(t);
 }
 
+// ------------------------------------------------------------ 按钮自绘（hover 高亮 + 手型光标）
+// 标准按钮不响应 hover，因此全部按钮改 BS_OWNERDRAW 父窗口自绘，
+// 并经典子类化跟踪 WM_MOUSEMOVE/WM_MOUSELEAVE 维护 hover 状态：
+//   普通 hover：亮边框 + 背景提亮；危险操作 hover：红色边框；光标统一手型
+
+struct BtnSub {
+    WNDPROC orig;
+    bool    hover;
+    bool    danger;   // 危险操作（关机/强制关机/断网）hover 用红色边框
+};
+
+static LRESULT CALLBACK SubBtnProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    BtnSub* s = (BtnSub*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    if (!s) return DefWindowProcW(h, msg, wp, lp);
+    switch (msg) {
+    case WM_MOUSEMOVE:
+        if (!s->hover) {
+            s->hover = true;
+            InvalidateRect(h, NULL, TRUE);
+            TRACKMOUSEEVENT tme;
+            tme.cbSize      = sizeof(tme);
+            tme.dwFlags     = TME_LEAVE;
+            tme.hwndTrack   = h;
+            tme.dwHoverTime = 0;
+            TrackMouseEvent(&tme);
+        }
+        break;
+    case WM_MOUSELEAVE:
+        s->hover = false;
+        InvalidateRect(h, NULL, TRUE);
+        break;
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorW(NULL, IDC_HAND));
+        return TRUE;
+    }
+    return CallWindowProcW(s->orig, h, msg, wp, lp);
+}
+
+static void SubclassBtn(HWND h, bool danger) {
+    if (!h) return;
+    BtnSub* s = new BtnSub();
+    s->orig   = (WNDPROC)SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)SubBtnProc);
+    s->hover  = false;
+    s->danger = danger;
+    SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)s);
+}
+
 // ------------------------------------------------------------ 消息处理
 static LRESULT CALLBACK WndProcSEH(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     __try { return WndProc(hwnd, msg, wp, lp); }
@@ -883,36 +955,37 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_edQd      = CreateWindowW(L"EDIT", L"8",    style, 0, 0, 100, 26, hwnd, (HMENU)IDC_ED_QD, NULL, NULL);
         g_edBlock   = CreateWindowW(L"EDIT", L"4096", style, 0, 0, 100, 26, hwnd, (HMENU)IDC_ED_BLOCK, NULL, NULL);
         g_edIops    = CreateWindowW(L"EDIT", L"0",    style, 0, 0, 100, 26, hwnd, (HMENU)IDC_ED_IOPS, NULL, NULL);
+
+        // 按钮统一 owner-draw + 子类化：hover 高亮 + 手型光标（危险按钮红色调）
+        DWORD bstyle = WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_OWNERDRAW;
         g_btnOne = CreateWindowW(L"BUTTON", L"下发到选中",
-                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                 0, 0, 100, 32, hwnd, (HMENU)IDC_BTN_ONE, NULL, NULL);
+                                 bstyle, 0, 0, 100, 32, hwnd, (HMENU)IDC_BTN_ONE, NULL, NULL);
         g_btnAll = CreateWindowW(L"BUTTON", L"下发到全部在线",
-                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                 0, 0, 100, 32, hwnd, (HMENU)IDC_BTN_ALL, NULL, NULL);
+                                 bstyle, 0, 0, 100, 32, hwnd, (HMENU)IDC_BTN_ALL, NULL, NULL);
         g_btnP1  = CreateWindowW(L"BUTTON", L"1x1 QD",
-                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P1, NULL, NULL);
+                                 bstyle, 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P1, NULL, NULL);
         g_btnP16 = CreateWindowW(L"BUTTON", L"16x16 QD",
-                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P16, NULL, NULL);
+                                 bstyle, 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P16, NULL, NULL);
         g_btnP32 = CreateWindowW(L"BUTTON", L"32x32 QD",
-                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P32, NULL, NULL);
+                                 bstyle, 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P32, NULL, NULL);
         g_btnPwr0 = CreateWindowW(L"BUTTON", L"立即注销",
-                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR0, NULL, NULL);
+                                  bstyle, 0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR0, NULL, NULL);
         g_btnPwr1 = CreateWindowW(L"BUTTON", L"立即关机",
-                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR1, NULL, NULL);
+                                  bstyle, 0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR1, NULL, NULL);
         g_btnPwr2 = CreateWindowW(L"BUTTON", L"立即强制关机",
-                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR2, NULL, NULL);
+                                  bstyle, 0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR2, NULL, NULL);
         g_btnNet0 = CreateWindowW(L"BUTTON", L"一键断网",
-                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_NET0, NULL, NULL);
-        g_btnNet1 = CreateWindowW(L"BUTTON", L"恢复网络",
-                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_NET1, NULL, NULL);
+                                  bstyle, 0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_NET0, NULL, NULL);
+
+        SubclassBtn(g_btnOne,  false);
+        SubclassBtn(g_btnAll,  false);
+        SubclassBtn(g_btnP1,   false);
+        SubclassBtn(g_btnP16,  false);
+        SubclassBtn(g_btnP32,  false);
+        SubclassBtn(g_btnPwr0, false);
+        SubclassBtn(g_btnPwr1, true);    // 关机：危险
+        SubclassBtn(g_btnPwr2, true);    // 强制关机：危险
+        SubclassBtn(g_btnNet0, true);    // 断网：危险
         SendMessageW(g_edThreads, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_edQd, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_edBlock, WM_SETFONT, (WPARAM)g_fBody, TRUE);
@@ -926,7 +999,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(g_btnPwr1, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_btnPwr2, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_btnNet0, WM_SETFONT, (WPARAM)g_fBody, TRUE);
-        SendMessageW(g_btnNet1, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SetTimer(hwnd, 1, 1000, NULL);
         CreateThread(NULL, 0, ListenThreadSEH, NULL, 0, NULL);
         SrvLog("[OK]   界面", "UI 创建完成，监听线程已启动");
@@ -949,6 +1021,43 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
+    case WM_DRAWITEM: {
+        // 按钮 owner-draw：hover 高亮 / 按下加深 / 危险按钮红色边框
+        const DRAWITEMSTRUCT* d = (const DRAWITEMSTRUCT*)lp;
+        if (d->CtlType != ODT_BUTTON) break;
+        BtnSub* s = (BtnSub*)GetWindowLongPtrW(d->hwndItem, GWLP_USERDATA);
+        bool hover  = s ? s->hover  : false;
+        bool danger = s ? s->danger : false;
+        bool down   = (d->itemState & ODS_SELECTED) != 0;
+
+        COLORREF bg = down ? C_CARD_SEL : C_CARD;
+        if (down)       bg = danger ? RGB(96, 32, 36)  : C_CARD_SEL;
+        else if (hover) bg = danger ? RGB(74, 36, 42)  : C_CARD_SEL;
+        HBRUSH b = CreateSolidBrush(bg);
+        FillRect(d->hDC, &d->rcItem, b);
+        DeleteObject(b);
+
+        COLORREF border = C_BORDER;
+        if (down)       border = danger ? RGB(255, 100, 100) : C_ACCENT;
+        else if (hover) border = danger ? RGB(235, 95, 95)   : C_ACCENT;
+        HPEN p  = CreatePen(PS_SOLID, hover ? 2 : 1, border);
+        HPEN op = (HPEN)SelectObject(d->hDC, p);
+        HBRUSH ob = (HBRUSH)SelectObject(d->hDC, GetStockObject(NULL_BRUSH));
+        RECT rc = d->rcItem;
+        rc.right--; rc.bottom--;
+        Rectangle(d->hDC, rc.left, rc.top, rc.right, rc.bottom);
+        SelectObject(d->hDC, ob);
+        SelectObject(d->hDC, op);
+        DeleteObject(p);
+
+        wchar_t txt[64];
+        GetWindowTextW(d->hwndItem, txt, 64);
+        SetTextColor(d->hDC, hover ? C_TEXT : C_SUB);
+        SetBkMode(d->hDC, TRANSPARENT);
+        RECT tr = d->rcItem;
+        DrawTextW(d->hDC, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return TRUE;
+    }
     case WM_COMMAND:
         if (HIWORD(wp) == BN_CLICKED) {
             switch (LOWORD(wp)) {
@@ -961,7 +1070,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             case IDC_BTN_PWR1: PushPower(1); break;
             case IDC_BTN_PWR2: PushPower(2); break;
             case IDC_BTN_NET0: PushNet(0); break;
-            case IDC_BTN_NET1: PushNet(1); break;
             }
         }
         return 0;
@@ -969,18 +1077,46 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
         RECT rc; GetClientRect(hwnd, &rc);
         RECT pl = PanelLeft(rc);
-        int cardW = pl.right - pl.left - 24, cardH = 190;
+        int cardW = pl.right - pl.left - 24, cardH = 268;
+        const int TOP5_Y = 188, ROW_H = 15;
+
+        int killPid = 0;
+        Client* killClient = NULL;
 
         EnterCriticalSection(&g_clientsLock);
         int n = (int)g_clients.size();
-        LeaveCriticalSection(&g_clientsLock);
 
         g_selected = -1;
         for (int i = 0; i < n; i++) {
             int cy = pl.top + 48 + i * (cardH + 12);
             if (cy + cardH > pl.bottom - 8) break;
-            if (x >= pl.left + 12 && x <= pl.left + 12 + cardW &&
-                y >= cy && y <= cy + cardH) { g_selected = i; break; }
+            if (x < pl.left + 12 || x > pl.left + 12 + cardW) continue;
+            if (y < cy || y > cy + cardH) continue;
+
+            Client* c = g_clients[i];
+            g_selected = i;
+
+            // Top5 行右侧「关闭」命中（优先于选中）
+            EnterCriticalSection(&c->lock);
+            if (y >= cy + TOP5_Y && y < cy + TOP5_Y + c->top5n * ROW_H &&
+                x >= pl.left + 12 + cardW - 74 && x <= pl.left + 12 + cardW - 14) {
+                killPid = c->top5[(y - (cy + TOP5_Y)) / ROW_H].pid;
+                killClient = c;
+            }
+            LeaveCriticalSection(&c->lock);
+            break;
+        }
+        LeaveCriticalSection(&g_clientsLock);
+
+        if (killPid && killClient) {
+            char line[64];
+            sprintf(line, "KILL|%u|%S\r\n", killPid, kCmdKeyW);
+            if (SendLine(killClient, line)) {
+                SrvLog("[OK]   关闭应用", "KILL pid=%u -> %s", killPid, killClient->id.c_str());
+                swprintf(g_status, 256, L"已下发关闭 pid %u，Top5 将随下次上报自动刷新", killPid);
+            } else {
+                swprintf(g_status, 256, L"关闭指令发送失败（目标可能已离线）");
+            }
         }
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
@@ -1004,10 +1140,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MoveWindow(g_btnPwr0, x, pr.top + 464, w, 28, TRUE);
         MoveWindow(g_btnPwr1, x, pr.top + 498, w, 28, TRUE);
         MoveWindow(g_btnPwr2, x, pr.top + 532, w, 28, TRUE);
-        // 网络控制：一行两个（断网 / 恢复）
-        int wn = (w - 8) / 2;
-        MoveWindow(g_btnNet0, x,            pr.top + 586, wn,      28, TRUE);
-        MoveWindow(g_btnNet1, x + wn + 8,   pr.top + 586, w - wn - 8, 28, TRUE);
+        // 网络控制：一键断网（恢复 = 目标机重启后服务自愈，无需人工）
+        MoveWindow(g_btnNet0, x, pr.top + 586, w, 28, TRUE);
         return 0;
     }
     case WM_PAINT: {
@@ -1049,7 +1183,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DrawTextAt(mem, L"每秒刷新 · 绿点在线 / 灰点离线 · 点击卡片选中",
                    pl.left + 130, pl.top + 16, g_fSmall, C_SUB);
 
-        int cardW = pl.right - pl.left - 24, cardH = 190;
+        int cardW = pl.right - pl.left - 24, cardH = 268;
         int hidden = 0;
         EnterCriticalSection(&g_clientsLock);
         for (int i = 0; i < (int)g_clients.size(); i++) {
@@ -1108,14 +1242,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 swprintf(tmp, 256, L"盘: %s   %s·%s   %.0f GB", mw, bw, tw, c->diskCapGB);
                 DrawTextAt(mem, tmp, card.left + 20, card.top + 100, g_fBody, C_TEXT);
 
+                // N/A 统一处理：temp=-1 / hours=UINT64_MAX / written<0 都不显示原始值
+                wchar_t tempStr[16], hoursStr[24], writtenStr[24];
+                if (c->diskTemp >= 0)
+                    swprintf(tempStr, 16, L"%d°C", c->diskTemp);
+                else
+                    wcscpy(tempStr, L"N/A");
+                if (c->diskHours != 0xFFFFFFFFFFFFFFFFULL)
+                    swprintf(hoursStr, 24, L"%llu h", (unsigned long long)c->diskHours);
+                else
+                    wcscpy(hoursStr, L"N/A");
+                if (c->diskWrittenGB >= 0)
+                    swprintf(writtenStr, 24, L"%.1f TB", c->diskWrittenGB / 1024.0);
+                else
+                    wcscpy(writtenStr, L"N/A");
+
                 if (c->diskPct >= 0) {
-                    swprintf(tmp, 256, L"寿命已用 %d%%   温度 %d°C   通电 %llu h   盘累计写 %.1f TB   剩余 %.0f GB",
-                             c->diskPct, c->diskTemp,
-                             (unsigned long long)c->diskHours,
-                             c->diskWrittenGB / 1024.0, c->diskFreeGB);
+                    swprintf(tmp, 256, L"寿命已用 %d%%   温度 %s   通电 %s   盘累计写 %s   剩余 %.0f GB",
+                             c->diskPct, tempStr, hoursStr, writtenStr, c->diskFreeGB);
                 } else {
-                    swprintf(tmp, 256, L"寿命: N/A (SATA 不出 SMART)   盘累计写 %.1f TB   剩余 %.0f GB",
-                             c->diskWrittenGB / 1024.0, c->diskFreeGB);
+                    swprintf(tmp, 256, L"寿命: N/A（此盘未提供寿命属性）   温度 %s   通电 %s   盘累计写 %s   剩余 %.0f GB",
+                             tempStr, hoursStr, writtenStr, c->diskFreeGB);
                 }
                 DrawTextAt(mem, tmp, card.left + 20, card.top + 126, g_fSmall, C_SUB);
             } else {
@@ -1132,17 +1279,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                                  : (L"IOPS ≤ " + std::to_wstring(c->cfg.iops)));
                 int cx = card.left + 20;
                 for (size_t k = 0; k < chips.size(); k++) {
-                    DrawTextAt(mem, chips[k].c_str(), cx, card.top + 156, g_fBody, C_TEXT);
+                    DrawTextAt(mem, chips[k].c_str(), cx, card.top + 150, g_fBody, C_TEXT);
                     SIZE csz;
                     HFONT ofc = (HFONT)SelectObject(mem, g_fBody);
                     GetTextExtentPoint32W(mem, chips[k].c_str(), (int)chips[k].size(), &csz);
                     SelectObject(mem, ofc);
                     cx += csz.cx + 8;
                     if (k + 1 < chips.size() && cx + 12 < card.right - 16) {
-                        DrawTextAt(mem, L"|", cx, card.top + 156, g_fBody, C_BORDER);
+                        DrawTextAt(mem, L"|", cx, card.top + 150, g_fBody, C_BORDER);
                         cx += 16;
                     }
                 }
+            }
+
+            // ---- Top5 CPU 占用（PROC 行随 STATS 每 2s 刷新）----
+            DrawTextAt(mem, L"Top5 CPU 占用（点「关闭」强制结束该进程）",
+                       card.left + 20, card.top + 172, g_fSmall, C_SUB);
+            for (int r = 0; r < c->top5n; r++) {
+                int ry = card.top + 188 + r * 15;
+                std::wstring nm = c->top5[r].name;
+                if (nm.size() > 26) nm = nm.substr(0, 26) + L"...";
+                bool hot = c->top5[r].cpu >= 50.0f;
+                swprintf(tmp, 256, L"%d. %s", r + 1, nm.c_str());
+                DrawTextAt(mem, tmp, card.left + 20, ry, g_fSmall,
+                           hot ? RGB(255, 150, 90) : C_TEXT);
+                swprintf(tmp, 256, L"%.1f%%", c->top5[r].cpu);
+                DrawTextAt(mem, tmp, card.right - 140, ry, g_fSmall,
+                           hot ? RGB(255, 150, 90) : C_TEXT);
+                DrawTextAt(mem, L"关闭", card.right - 76, ry, g_fSmall, C_ACCENT);
             }
 
             if (c->online) {

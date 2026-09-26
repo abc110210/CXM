@@ -1,13 +1,22 @@
 // 硬盘信息采集实现（LocalSystem/管理员权限下运行）
 // 判定策略：NVMe 总线 -> SSD(NVMe)；SeekPenalty 特性 -> SSD/HDD；TRIM 辅助。
-// 寿命/温度/通电/总写入：NVMe Health Log (Log Page 0x02)，通过
-// IOCTL_STORAGE_QUERY_PROPERTY + StorageDeviceProtocolSpecificProperty 获取。
+// 寿命/温度/通电/总写入：
+//   NVMe（含 M.2 NVMe 形态）：NVMe Health Log (Log Page 0x02)，
+//     通过 IOCTL_STORAGE_QUERY_PROPERTY + StorageDeviceProtocolSpecificProperty 获取。
+//   SATA（含 M.2 SATA 形态的 SSD 与机械盘）：ATA SMART 属性表，双路径最大兼容：
+//     路径A（Win10 1803+，官方推荐）：IOCTL_STORAGE_QUERY_PROPERTY + ProtocolTypeAta
+//     路径B（更老系统回退）：SCSI PASS-THROUGH (SAT-2) ATA PASS-THROUGH(12)
+//     SSD 寿命取属性 E7/A9（剩余百分比，换算为已用）；机械盘出温度/通电/写入，寿命诚实 N/A。
 #define _CRT_SECURE_NO_WARNINGS
 #include "diskinfo.h"
 #include <winioctl.h>
 #include <ntddstor.h>
 #include <cstdio>
 #include <cstring>
+
+#ifndef ATAProtocolData
+#define ATAProtocolData 0x00000001
+#endif
 
 // NVMe Health Information Log (512B) 关键偏移（NVMe 1.3 spec）
 static const size_t NV_OFF_CRITICAL   = 0;
@@ -87,6 +96,106 @@ static std::string ExtractModel(const unsigned char* desc, DWORD total) {
     }
     while (!clean.empty() && clean[clean.size()-1] == ' ') clean.erase(clean.size()-1);
     return clean;
+}
+
+// ---- SATA/ATA SMART（SATA SSD 含 M.2 SATA 形态；机械盘出温度/通电）----
+
+// 路径A：ATA 寄存器级透传（IOCTL_STORAGE_QUERY_PROPERTY + ProtocolTypeAta，Win10 1803+）
+static bool QuerySmartViaAtaProperty(HANDLE h, unsigned char smart512[512]) {
+    const DWORD headerSize = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
+    unsigned char buf[sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) + 512];
+    const DWORD bufLen = sizeof(buf);
+    ZeroMemory(buf, bufLen);
+
+    STORAGE_PROPERTY_QUERY* q = (STORAGE_PROPERTY_QUERY*)buf;
+    q->PropertyId = StorageDeviceProtocolSpecificProperty;
+    q->QueryType  = PropertyStandardQuery;
+    STORAGE_PROTOCOL_SPECIFIC_DATA* psd = (STORAGE_PROTOCOL_SPECIFIC_DATA*)q->AdditionalParameters;
+    psd->ProtocolType                = ProtocolTypeAta;
+    psd->DataType                    = ATAProtocolData;
+    // SMART READ DATA：Command=0xB0, Features=0xD0, LBA Mid/High=0x4F/0xC2（SMART 魔数）
+    psd->ProtocolDataRequestValue    = 0xB0;         // Command 寄存器
+    psd->ProtocolDataRequestSubValue = 0xD0;         // Features 寄存器
+    psd->ProtocolDataRequestSubValue2 = 0x00;        // Sector Count
+    psd->ProtocolDataRequestSubValue3 = 0x00C24F00;  // LBA Low=00 | Mid=4F<<8 | High=C2<<16
+    psd->ProtocolDataOffset          = headerSize;
+    psd->ProtocolDataLength          = 512;
+
+    DWORD ret = 0;
+    if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buf, bufLen,
+                         buf, bufLen, &ret, NULL)) return false;
+    if (ret < headerSize + 512) return false;
+    memcpy(smart512, buf + headerSize, 512);
+    return true;
+}
+
+// 路径B：SCSI PASS-THROUGH (SAT-2) ATA PASS-THROUGH(12)，老系统/老驱动回退
+static bool QuerySmartViaSat(HANDLE h, unsigned char smart512[512]) {
+    union {
+        SCSI_PASS_THROUGH_DIRECT sptd;
+        unsigned char buf[sizeof(SCSI_PASS_THROUGH_DIRECT) + 512];
+    } u;
+    ZeroMemory(&u, sizeof(u));
+    u.sptd.Length             = sizeof(SCSI_PASS_THROUGH_DIRECT);
+    u.sptd.CdbLength          = 12;
+    u.sptd.DataIn             = SCSI_IOCTL_DATA_IN;
+    u.sptd.DataTransferLength = 512;
+    u.sptd.TimeOutValue       = 10;
+    u.sptd.DataBuffer         = u.buf + sizeof(SCSI_PASS_THROUGH_DIRECT);
+    u.sptd.Cdb[0] = 0xA1;   // ATA PASS-THROUGH (12)
+    u.sptd.Cdb[1] = 0x08;   // Protocol = PIO Data-In（SAT-2: protocol<<1）
+    u.sptd.Cdb[2] = 0x2E;   // T_LENGTH=3 | T_DIR=1(data-in) | BYT_BLOC=1
+    u.sptd.Cdb[3] = 0xD0;   // Features  = SMART READ DATA
+    u.sptd.Cdb[4] = 0x00;   // Sector Count
+    u.sptd.Cdb[5] = 0x00;   // LBA Low
+    u.sptd.Cdb[6] = 0x4F;   // LBA Mid  (SMART 魔数)
+    u.sptd.Cdb[7] = 0xC2;   // LBA High (SMART 魔数)
+    u.sptd.Cdb[8] = 0xA0;   // Device
+    u.sptd.Cdb[9] = 0xB0;   // Command  = SMART
+
+    DWORD ret = 0;
+    if (!DeviceIoControl(h, IOCTL_SCSI_PASS_THROUGH_DIRECT, &u, sizeof(u),
+                         &u, sizeof(u), &ret, NULL)) return false;
+    if (u.sptd.ScsiStatus != 0) return false;
+    memcpy(smart512, u.buf + sizeof(SCSI_PASS_THROUGH_DIRECT), 512);
+    return true;
+}
+
+// SMART READ DATA 512B -> 属性表解析（offset 2 起，30 个 12 字节属性）
+static void ParseSmartToInfo(const unsigned char smart[512], DiskInfo& out) {
+    for (int i = 0; i < 30; i++) {
+        const unsigned char* a = smart + 2 + i * 12;
+        unsigned char id = a[0];
+        if (id == 0x00) continue;
+        unsigned char value = a[3];
+        unsigned long long raw = 0;
+        for (int k = 5; k >= 0; k--) raw = (raw << 8) | a[4 + k];   // raw 低 6 字节
+        switch (id) {
+            case 0x09: {  // Power-On Hours（个别盘单位为分钟/秒，温和启发式纠正）
+                unsigned long long h = raw;
+                if (h > 200000ULL) h /= 60;
+                if (h > 200000ULL) h /= 60;
+                out.powerOnHours = h;
+                break;
+            }
+            case 0xC2: {  // Temperature（raw 低 2 字节）
+                int t = (int)(raw & 0xFFFF);
+                out.tempC = (t >= -50 && t <= 150) ? t : -1;
+                break;
+            }
+            case 0xA9:  // Remaining Life Percentage（较新 SATA SSD）
+            case 0xE7:  // SSD Life Left（经典 SATA SSD 剩余寿命百分比）
+                if (value <= 100 && out.pctUsed < 0) out.pctUsed = 100 - value;
+                break;
+            case 0xF1: {  // Total LBAs Written（主机累计写入）
+                if (out.writtenGB < 0 && raw > 0) {
+                    out.writtenGB = (double)(raw & 0xFFFFFFFFFFFFULL) * 512.0
+                                    / (1024.0 * 1024.0 * 1024.0);
+                }
+                break;
+            }
+        }
+    }
 }
 
 bool QueryStressDiskInfo(const std::wstring& stressFilePath, DiskInfo& out) {
@@ -170,8 +279,9 @@ bool QueryStressDiskInfo(const std::wstring& stressFilePath, DiskInfo& out) {
         }
     }
 
-    // ---- 6) NVMe Health Log：寿命 / 温度 / 通电 / 总写入 ----
+    // ---- 6) SMART / Health：寿命 / 温度 / 通电 / 总写入 ----
     if (out.bus == "NVMe") {
+        // M.2 NVMe 与 PCIe NVMe：NVMe Health Log
         unsigned char hl[512];
         ZeroMemory(hl, sizeof(hl));
         if (QueryNvmeHealth(hd, hl)) {
@@ -182,6 +292,14 @@ bool QueryStressDiskInfo(const std::wstring& stressFilePath, DiskInfo& out) {
             out.writtenGB     = (double)units * NV_UNIT_BYTES / (1024.0 * 1024.0 * 1024.0);
             out.powerOnHours  = Le128ToU64(hl + NV_OFF_PWR_HOURS);
         }
+    } else if (out.bus == "SATA" || out.bus == "ATA") {
+        // SATA SSD（含 M.2 SATA 形态）与机械盘：ATA SMART 双路径
+        unsigned char sm[512];
+        ZeroMemory(sm, sizeof(sm));
+        if (QuerySmartViaAtaProperty(hd, sm) || QuerySmartViaSat(hd, sm)) {
+            ParseSmartToInfo(sm, out);
+        }
+        // 机械盘没有寿命属性：pctUsed 保持 -1，服务端诚实显示 N/A
     }
 
     CloseHandle(hd);

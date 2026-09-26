@@ -362,13 +362,13 @@ static void FoldGen(Stats& base, std::vector<ThreadCtx*>& tcs, SyncCtx& sc) {
     sc.count = 0; sc.failures = 0; sc.sumUs = 0; sc.maxUs = 0; sc.hist = LatencyHist();
 }
 
-// 网络自愈线程：上次"一键断网"后机器重启的，开机拉起时自动删除防火墙阻塞规则
-// 恢复网络（规则持久存在，不删会一直断网）。必须在独立线程执行：
-// netsh 两条命令最长可阻塞 20s，若同步跑会拖死 SCM START_PENDING，
-// 触发失败重启链 -> 再卡 -> 启动死循环
+// 网络自愈线程：上次"一键断网"后机器重启的，开机拉起时按清单恢复被禁用的网卡。
+// 必须在独立线程执行：网卡操作有耗时，若同步跑会拖死 SCM START_PENDING，
+// 触发失败重启链 -> 再卡 -> 启动死循环。
+// 只恢复清单（netblock.ini）里记录的网卡 = 只恢复自己禁用的，不碰用户手动禁用的。
 static DWORD WINAPI NetHealThread(LPVOID p) {
     std::wstring* dir = (std::wstring*)p;
-    NetBlockApply(false, *dir);
+    NetBlockNicApply(false, *dir);
     delete dir;
     return 0;
 }

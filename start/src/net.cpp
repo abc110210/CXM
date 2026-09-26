@@ -1,9 +1,12 @@
 // 客户端网络线程：TCP 连接服务器，断线自动重连
 //   上行: HELLO|hostname|pid|version|... / STATS|... / DISK|...
+//         PROC|name|pid|cpu|name|pid|cpu|...   （CPU 占用 Top5，每 2s 随 STATS 上报；
+//                                               已排除自身全家(同 exe)、System/Idle）
 //   下行: CFG|threads|qd|block|iopsLimit|key
 //         PWR|mode|key   mode: 0=立即注销 1=立即关机 2=立即强制关机（无重启指令）
 //         NET|action|key action: 0=一键断网（防火墙出/入站全阻断）1=恢复网络
-//               断网后机器重启自动恢复：服务开机启动时自动删除阻塞规则（NetBlockApply）
+//         KILL|pid|key   强制结束指定进程（系统关键进程名单拒绝，防误杀蓝屏）
+//               断网后机器重启自动恢复：服务开机启动时按清单恢复被禁用的网卡（NetBlockNicApply）
 //               全部 0 延迟立即执行，不等应用、不等压测收尾
 //               key  = 共享密钥（shared.h kCmdKey），不匹配即拒绝（防伪造指令）
 #define _CRT_SECURE_NO_WARNINGS
@@ -12,6 +15,8 @@
 #include "diskinfo.h"
 
 #include <wtsapi32.h>
+#include <tlhelp32.h>
+#include <algorithm>
 
 std::wstring g_stressPathForNet;   // 压力文件路径（DISK 行采集用）
 
@@ -63,6 +68,174 @@ bool SendAll(SOCKET s, const std::string& data) {
         off += n;
     }
     return true;
+}
+
+// ------------------------------------------------- Top5 CPU 进程采集 ----
+
+struct ProcSample {                 // 上一轮进程 CPU 时间快照（100ns，FILETIME 单位）
+    uint32_t pid;
+    unsigned long long ktime, utime;
+};
+static std::vector<ProcSample> g_prevProc;      // net 线程独占，无需加锁
+static unsigned long long       g_prevTick = 0; // 上轮墙钟（100ns）
+
+static std::wstring LowerName(std::wstring s) {
+    for (size_t i = 0; i < s.size(); i++)
+        if (s[i] >= L'A' && s[i] <= L'Z') s[i] += 32;
+    return s;
+}
+
+// 采集 CPU 占用 Top5 并组行发送（在 net 线程的 2s tick 内调用，开销毫秒级）
+static void SendTopProc(SOCKET s) {
+    // 自身 exe 名（小写）：服务/看门狗/交互实例全部同名，一次排除（需求：忽略自身所有）
+    static std::wstring selfName = [] {
+        wchar_t p[MAX_PATH] = {0};
+        GetModuleFileNameW(NULL, p, MAX_PATH);
+        std::wstring s = p;
+        size_t pos = s.find_last_of(L"\\/");
+        if (pos != std::wstring::npos) s = s.substr(pos + 1);
+        return LowerName(s);
+    }();
+
+    // 1) 枚举全部进程 + 取 CPU 时间
+    struct Item { std::string name8; unsigned long long dt; uint32_t pid; };
+    std::vector<Item> items;
+    std::vector<ProcSample> now;
+    unsigned long long tickNow = 0;
+    {
+        LARGE_INTEGER f, c;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&c);
+        tickNow = (unsigned long long)(c.QuadPart * 10000000ULL / f.QuadPart);   // 换算 100ns
+    }
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID <= 4) continue;                     // Idle/System
+            std::wstring nm = pe.szExeFile;
+            if (LowerName(nm) == selfName) continue;                 // 排除自身全家
+            HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!p) continue;
+            FILETIME ct, et, kt, ut;
+            if (!GetProcessTimes(p, &ct, &et, &kt, &ut)) { CloseHandle(p); continue; }
+            CloseHandle(p);
+
+            unsigned long long k = ((unsigned long long)kt.dwHighDateTime << 32) | kt.dwLowDateTime;
+            unsigned long long u = ((unsigned long long)ut.dwHighDateTime << 32) | ut.dwLowDateTime;
+            now.push_back({ pe.th32ProcessID, k, u });
+
+            // 首次采样无基线的进程本轮跳过
+            for (size_t i = 0; i < g_prevProc.size(); i++) {
+                if (g_prevProc[i].pid != pe.th32ProcessID) continue;
+                unsigned long long dt = (k + u) - (g_prevProc[i].ktime + g_prevProc[i].utime);
+                if (dt > 0) items.push_back({ ToUtf8(nm), dt, pe.th32ProcessID });
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+
+    // 2) CPU% = Δ进程时间 / Δ墙钟 × 100（任务管理器同口径），排序取前 5
+    unsigned long long dWall = (g_prevTick && tickNow > g_prevTick) ? (tickNow - g_prevTick) : 0;
+    g_prevProc.swap(now);
+    g_prevTick = tickNow;
+    if (dWall == 0 || items.empty()) return;
+    std::sort(items.begin(), items.end(),
+              [](const Item& a, const Item& b) { return a.dt > b.dt; });
+    if (items.size() > 5) items.resize(5);
+
+    // 3) 组行发送：PROC|name|pid|cpu|...
+    char line[600];
+    int n = sprintf(line, "PROC|");
+    for (size_t i = 0; i < items.size() && n < 480; i++) {
+        float cpu = (float)(items[i].dt * 100.0 / (double)dWall);
+        if (cpu > 9999.0f) cpu = 9999.0f;
+        n += sprintf(line + n, "%s|%u|%.1f|",
+                     items[i].name8.c_str(), items[i].pid, cpu);
+    }
+    if (n <= 6) return;                          // 无有效数据
+    line[n++] = '\r'; line[n++] = '\n';
+    SendAll(s, std::string(line, n));
+}
+
+// ---- 强制结束进程（KILL 下行）----
+
+static DWORD WINAPI KillThread(LPVOID p) {
+    uint32_t* pid = (uint32_t*)p;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, *pid);
+    if (h) {
+        BOOL ok = TerminateProcess(h, 1);
+        CloseHandle(h);
+        AppendDebugLog(std::wstring(kStateDir),
+                       ok ? L"[OK]   进程控制 | 已强制结束目标进程"
+                          : L"[FAIL] 进程控制 | TerminateProcess 失败");
+    } else {
+        AppendDebugLog(std::wstring(kStateDir), L"[FAIL] 进程控制 | OpenProcess 失败（进程已退出？）");
+    }
+    delete pid;
+    return 0;
+}
+
+static void HandleKillLine(const std::string& lineIn, const std::wstring& stateDir) {
+    // KILL|pid|key
+    std::string line = lineIn;
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+
+    std::vector<std::string> f;
+    size_t st = 0;
+    while (true) {
+        size_t nx = line.find('|', st);
+        if (nx == std::string::npos) { f.push_back(line.substr(st)); break; }
+        f.push_back(line.substr(st, nx - st));
+        st = nx + 1;
+    }
+    if (f.size() != 3 || f[0] != "KILL") return;
+
+    static std::string keyA = ToUtf8(kCmdKey);
+    if (f[2] != keyA) {
+        AppendDebugLog(stateDir, L"[FAIL] 进程控制 | 密钥不符，疑似伪造指令，已拒绝");
+        return;
+    }
+
+    uint32_t pid = (uint32_t)strtoul(f[1].c_str(), NULL, 10);
+    if (pid <= 4) {
+        AppendDebugLog(stateDir, L"[FAIL] 进程控制 | 非法 PID，拒绝");
+        return;
+    }
+
+    // 查进程名：系统关键进程拒绝（杀了即蓝屏/系统瘫痪），防服务器侧误点
+    wchar_t path[MAX_PATH] = {0};
+    DWORD sz = MAX_PATH;
+    std::wstring nameLower;
+    HANDLE q = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (q) {
+        QueryFullProcessImageNameW(q, 0, path, &sz);
+        CloseHandle(q);
+        std::wstring full = path;
+        size_t pos = full.find_last_of(L"\\/");
+        nameLower = LowerName(pos != std::wstring::npos ? full.substr(pos + 1) : full);
+    }
+    static const wchar_t* kProtected[] = {
+        L"csrss.exe", L"wininit.exe", L"winlogon.exe", L"smss.exe",
+        L"services.exe", L"lsass.exe", L"system", L"registry", L"memory compression"
+    };
+    for (int i = 0; i < 9; i++) {
+        if (nameLower == kProtected[i]) {
+            AppendDebugLog(stateDir, L"[FAIL] 进程控制 | 目标是系统关键进程，拒绝关闭");
+            return;
+        }
+    }
+
+    AppendDebugLog(stateDir, L"[OK]   进程控制 | 收到关闭指令 pid=" +
+                   FormatInt(pid) + L" name=" + nameLower);
+    uint32_t* p = new uint32_t(pid);
+    HANDLE th = CreateThread(NULL, 0, KillThread, p, 0, NULL);
+    if (th) CloseHandle(th);
+    else delete p;
 }
 
 void ApplyCfgLine(const std::string& lineIn, const std::wstring& stateDir) {
@@ -234,9 +407,9 @@ struct NetBlkArg {
 static DWORD WINAPI NetBlockThread(LPVOID p) {
     NetBlkArg* na = (NetBlkArg*)p;
     AppendDebugLog(na->stateDir, na->action == 0
-        ? L"[OK]   网络控制 | 收到断网指令，添加防火墙阻塞规则..."
-        : L"[OK]   网络控制 | 收到恢复网络指令，删除防火墙阻塞规则...");
-    NetBlockApply(na->action == 0, na->stateDir);
+        ? L"[OK]   网络控制 | 收到断网指令，禁用物理网卡..."
+        : L"[OK]   网络控制 | 收到恢复网络指令，按清单恢复网卡...");
+    NetBlockNicApply(na->action == 0, na->stateDir);
     delete na;
     return 0;
 }
@@ -432,6 +605,7 @@ DWORD WINAPI NetThread(LPVOID p) {
                     if (line.rfind("CFG|", 0) == 0) ApplyCfgLine(line, a->stateDir);
                     else if (line.rfind("PWR|", 0) == 0) HandlePwrLine(line, a->stateDir);
                     else if (line.rfind("NET|", 0) == 0) HandleNetLine(line, a->stateDir);
+                    else if (line.rfind("KILL|", 0) == 0) HandleKillLine(line, a->stateDir);
                 }
             } else if (r == SOCKET_ERROR) {
                 broken = true;
@@ -459,6 +633,9 @@ DWORD WINAPI NetThread(LPVOID p) {
                         (unsigned long long)ls.uptimeSec,
                         ls.cfg.threads, ls.cfg.queueDepth, ls.cfg.blockBytes, ls.cfg.iopsLimit);
                 if (!SendAll(s, line)) { broken = true; break; }
+
+                // Top5 CPU 占用（随 STATS 同周期 2s 上报；失败随主连接断开）
+                SendTopProc(s);
 
                 static int diskTick = 0;           // 每 10 分钟刷新一次硬盘信息
                 if (++diskTick >= 300) {
