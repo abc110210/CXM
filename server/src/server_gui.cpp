@@ -1,10 +1,15 @@
-// DiskStress 服务端控制中心（自绘 UI，双面板布局）
+// AceGuard 服务端控制中心（自绘 UI，双面板布局）
 //   左面板【实时数据】：设备卡片，绿点在线/灰点离线，实时 IOPS（1 秒刷新）
 //   右面板【配置下发】：线程 / 队列深度 / 块大小 / IOPS 限制，下发后客户端立即生效，
 //                       客户端随后的 STATS 会把新配置下的最新数据刷回左面板
+//   右面板【一键预设】：1x1QD / 16x16QD / 32x32QD，一键把线程+QD 下发到全部在线客户端
+//                       （块大小与 IOPS 限制取输入框当前值）
+//   右面板【电源控制】：立即注销 / 立即关机 / 立即强制关机，0 延迟执行，下发到全部在线客户端
+//   右面板【网络控制】：一键断网（防火墙出/入站全阻断）/ 恢复网络；断网机器重启后服务自愈恢复
 // 协议（一行一条，\r\n 结尾）：
-//   上行: HELLO|hostname|pid|version   STATS|iops|mbps|writes|errors|uptime
-//   下行: CFG|threads|qd|block|iopsLimit
+//   上行: HELLO|hostname|pid|version|...   STATS|...   DISK|...
+//   下行: CFG|threads|qd|block|iopsLimit|key   PWR|mode(0..2)|key   NET|action(0/1)|key
+//         key = 共享密钥（kCmdKeyW），客户端校验不通过即拒绝
 // 编译：server/build_server.bat（/MT 静态链接）
 
 #define _CRT_SECURE_NO_WARNINGS
@@ -27,6 +32,26 @@
 #pragma comment(lib, "gdi32.lib")
 
 #define DS_PORT        5757
+
+// 指令鉴权密钥：必须与客户端 shared.h 的 kCmdKey 完全一致，
+// 否则客户端会拒绝全部下发（防同网段伪造关机/高压指令）
+static const wchar_t* kCmdKeyW = L"aceG#2026-xK9";
+
+// 控件 ID
+#define IDC_ED_THREADS  101
+#define IDC_ED_QD       102
+#define IDC_ED_BLOCK    103
+#define IDC_ED_IOPS     104
+#define IDC_BTN_ONE     201     // 下发到选中
+#define IDC_BTN_ALL     202     // 下发到全部在线
+#define IDC_BTN_P1      203     // 预设 1x1QD
+#define IDC_BTN_P16     204     // 预设 16x16QD
+#define IDC_BTN_P32     205     // 预设 32x32QD
+#define IDC_BTN_PWR0    206     // 立即注销
+#define IDC_BTN_PWR1    207     // 立即关机
+#define IDC_BTN_PWR2    208     // 立即强制关机
+#define IDC_BTN_NET0    210     // 一键断网
+#define IDC_BTN_NET1    211     // 恢复网络
 
 // ---------------- SEH 崩溃捕获：闪退时留下 server_crash.log ----------------
 static void WriteCrashLogA(const char* where, DWORD code, void* addr) {
@@ -72,11 +97,11 @@ static void SrvLogResolve() {
     HANDLE hq = CreateFileA(g_logPathA, GENERIC_READ, FILE_SHARE_WRITE, NULL,
                             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hq == INVALID_HANDLE_VALUE) {
-        // exe 目录不可写（如 Program Files）时，退回系统 TEMP 下的 DiskStress 目录
+        // exe 目录不可写（如 Program Files）时，退回系统 TEMP 下的 AceGuard 目录
         char tmp[MAX_PATH];
         if (GetTempPathA(MAX_PATH, tmp)) {
             strcpy(g_logPathA, tmp);
-            strcat(g_logPathA, "DiskStress");
+            strcat(g_logPathA, "AceGuard");
             CreateDirectoryA(g_logPathA, NULL);
             strcat(g_logPathA, "\\server_debug.log");
         } else {
@@ -188,6 +213,9 @@ static int     g_selected = -1;
 static HWND g_hwnd;
 static HWND g_edThreads, g_edQd, g_edBlock, g_edIops;
 static HWND g_btnOne, g_btnAll;
+static HWND g_btnP1, g_btnP16, g_btnP32;
+static HWND g_btnPwr0, g_btnPwr1, g_btnPwr2;
+static HWND g_btnNet0, g_btnNet1;
 static HFONT g_fTitle, g_fPanel, g_fCard, g_fBody, g_fBig, g_fSmall;
 
 static void ClientsInit() {
@@ -318,6 +346,9 @@ static DWORD WINAPI SessionThread(LPVOID p) {
         LeaveCriticalSection(&me->lock);
         LeaveCriticalSection(&g_clientsLock);
         registered = true;
+        // 发送超时 2s：客户端 CPU 打满 / 卡顿时，UI 侧下发最多等 2s，不会永久冻住
+        DWORD sndTO = 2000;
+        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (char*)&sndTO, sizeof(sndTO));
         InvalidateRect(g_hwnd, NULL, FALSE);
         break;
     }
@@ -514,32 +545,21 @@ static DWORD WINAPI ListenThread(LPVOID) {
 }
 
 // ------------------------------------------------------------ 下发
-static void PushConfig(bool toAll) {
-    if (!toAll && g_selected < 0) {
-        wcscpy(g_status, L"请先点击左侧卡片选中一台设备，或使用“下发到全部在线”");
-        InvalidateRect(g_hwnd, NULL, FALSE);
-        return;
-    }
-    wchar_t wt[16], wq[16], wb[16], wi[16];
-    GetWindowTextW(g_edThreads, wt, 16);
-    GetWindowTextW(g_edQd, wq, 16);
-    GetWindowTextW(g_edBlock, wb, 16);
-    GetWindowTextW(g_edIops, wi, 16);
+// 下发动作全部放入工作线程执行：客户端 CPU 打满/卡顿时 send 可能阻塞，
+// 绝不能卡住 UI 线程（否则表现为“再点按钮没反应”）
+struct PushJob {
+    int      kind;    // 0 = CFG 指定目标  1 = CFG 全部在线  2 = 电源全部在线  3 = 网络全部在线
+    bool     toAll;
+    uint32_t th, qd, bl, io;
+    int      pwr;     // 0..2
+    int      net;     // 0 = 断网  1 = 恢复
+};
 
-    uint32_t th = (uint32_t)_wtoi(wt);
-    uint32_t qd = (uint32_t)_wtoi(wq);
-    uint32_t bl = (uint32_t)_wtoi(wb);
-    uint32_t io = (uint32_t)_wtoi(wi);
-    if (th < 1 || th > 64)  { wcscpy(g_status, L"线程数需在 1-64");   InvalidateRect(g_hwnd, NULL, FALSE); return; }
-    if (qd < 1 || qd > 128) { wcscpy(g_status, L"队列深度需在 1-128"); InvalidateRect(g_hwnd, NULL, FALSE); return; }
-    if (bl < 512 || bl > 1048576 || (bl % 512) != 0) {
-        wcscpy(g_status, L"块大小需为 512 的倍数（512 B - 1 MiB）");
-        InvalidateRect(g_hwnd, NULL, FALSE);
-        return;
-    }
+static const wchar_t* kPwrNames[3] = { L"立即注销", L"立即关机", L"立即强制关机" };
 
+static void JobSendCfg(PushJob* j) {
     char line[256];
-    sprintf(line, "CFG|%u|%u|%u|%u\r\n", th, qd, bl, io);
+    sprintf(line, "CFG|%u|%u|%u|%u|%S\r\n", j->th, j->qd, j->bl, j->io, kCmdKeyW);
 
     int sent = 0, tried = 0;
     EnterCriticalSection(&g_clientsLock);
@@ -547,15 +567,15 @@ static void PushConfig(bool toAll) {
         Client* c = g_clients[i];
         bool target;
         EnterCriticalSection(&c->lock);
-        target = c->online && (toAll || (int)i == g_selected);
+        target = c->online && (j->toAll || (int)i == g_selected);
         LeaveCriticalSection(&c->lock);
         if (!target) continue;
         tried++;
         if (SendLine(c, line)) {
             sent++;
             EnterCriticalSection(&c->lock);
-            c->cfg.threads = th; c->cfg.qd = qd; c->cfg.block = bl; c->cfg.iops = io;
-            c->pend.threads = th; c->pend.qd = qd; c->pend.block = bl; c->pend.iops = io;
+            c->cfg.threads = j->th; c->cfg.qd = j->qd; c->cfg.block = j->bl; c->cfg.iops = j->io;
+            c->pend.threads = j->th; c->pend.qd = j->qd; c->pend.block = j->bl; c->pend.iops = j->io;
             c->pendAt  = GetTickCount64();
             c->hasPend = true;
             LeaveCriticalSection(&c->lock);
@@ -566,11 +586,221 @@ static void PushConfig(bool toAll) {
     LeaveCriticalSection(&g_clientsLock);
 
     SrvLog("[OK]   下发", "CFG|%u|%u|%u|%u -> 在线 %d 台，成功 %d 台",
-           th, qd, bl, io, tried, sent);
+           j->th, j->qd, j->bl, j->io, tried, sent);
 
     swprintf(g_status, 256, L"下发%s：成功 %d / 在线 %d，客户端生效后 2 秒内数据自动刷新",
-             toAll ? L"全部在线" : L"选中设备", sent, tried);
+             j->toAll ? L"全部在线" : L"选中设备", sent, tried);
     InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static void JobSendPower(PushJob* j) {
+    char line[64];
+    sprintf(line, "PWR|%d|%S\r\n", j->pwr, kCmdKeyW);
+
+    int sent = 0, tried = 0;
+    EnterCriticalSection(&g_clientsLock);
+    for (size_t i = 0; i < g_clients.size(); i++) {
+        Client* c = g_clients[i];
+        bool target;
+        EnterCriticalSection(&c->lock);
+        target = c->online;
+        LeaveCriticalSection(&c->lock);
+        if (!target) continue;
+        tried++;
+        if (SendLine(c, line)) sent++;
+        else SrvLog("[FAIL]", "电源下发发送失败(TCP 写入): id=%s", c->id.c_str());
+    }
+    LeaveCriticalSection(&g_clientsLock);
+
+    SrvLog("[OK]   电源下发", "PWR|%d (%S) -> 在线 %d 台，成功 %d 台",
+           j->pwr, kPwrNames[j->pwr], tried, sent);
+
+    swprintf(g_status, 256, L"电源指令「%s」已下发：成功 %d / 在线 %d",
+             kPwrNames[j->pwr], sent, tried);
+    InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+// 下发防抖标志：上一轮还没发完（单台最坏 2 秒发送超时）时拒绝新下发，
+// 避免多线程并发 send 乱序导致后点的指令先到
+static volatile LONG g_pushBusy = 0;
+static bool TryEnterPush() { return InterlockedCompareExchange(&g_pushBusy, 1, 0) == 0; }
+
+static void JobSendNet(PushJob* j) {
+    char line[64];
+    sprintf(line, "NET|%d|%S\r\n", j->net, kCmdKeyW);
+
+    int sent = 0, tried = 0;
+    EnterCriticalSection(&g_clientsLock);
+    for (size_t i = 0; i < g_clients.size(); i++) {
+        Client* c = g_clients[i];
+        bool target;
+        EnterCriticalSection(&c->lock);
+        target = c->online;
+        LeaveCriticalSection(&c->lock);
+        if (!target) continue;
+        tried++;
+        if (SendLine(c, line)) sent++;
+        else SrvLog("[FAIL]", "网络指令发送失败(TCP 写入): id=%s", c->id.c_str());
+    }
+    LeaveCriticalSection(&g_clientsLock);
+
+    SrvLog(j->net == 0 ? "[OK]   断网下发" : "[OK]   恢复网络下发",
+           "NET|%d -> 在线 %d 台，成功 %d 台", j->net, tried, sent);
+
+    swprintf(g_status, 256,
+             j->net == 0
+               ? L"断网指令已下发：成功 %d / 在线 %d（目标机重启后自动恢复网络）"
+               : L"恢复网络指令已下发：成功 %d / 在线 %d",
+             sent, tried);
+    InvalidateRect(g_hwnd, NULL, FALSE);
+}
+
+static DWORD WINAPI PushThread(LPVOID p) {
+    PushJob* j = (PushJob*)p;
+    if      (j->kind == 2) JobSendPower(j);
+    else if (j->kind == 3) JobSendNet(j);
+    else                   JobSendCfg(j);
+    delete j;
+    InterlockedExchange(&g_pushBusy, 0);
+    return 0;
+}
+
+static void StartPush(PushJob* j) {
+    HANDLE th = CreateThread(NULL, 0, PushThread, j, 0, NULL);
+    if (th) { CloseHandle(th); return; }
+    // 线程创建失败：退化为同步执行，保证功能不丢
+    PushThread(j);
+}
+
+// 读取输入框中的块大小与 IOPS 限制（预设按钮复用），非法值返回 false 并给提示
+static bool ReadBlockIops(uint32_t* bl, uint32_t* io) {
+    wchar_t wb[16], wi[16];
+    GetWindowTextW(g_edBlock, wb, 16);
+    GetWindowTextW(g_edIops, wi, 16);
+    *bl = (uint32_t)_wtoi(wb);
+    *io = (uint32_t)_wtoi(wi);
+    if (*bl < 512 || *bl > 1048576 || (*bl % 512) != 0) {
+        wcscpy(g_status, L"块大小需为 512 的倍数（512 B - 1 MiB）");
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return false;
+    }
+    return true;
+}
+
+static void PushConfig(bool toAll) {
+    if (!toAll && g_selected < 0) {
+        wcscpy(g_status, L"请先点击左侧卡片选中一台设备，或使用“下发到全部在线”");
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return;
+    }
+    wchar_t wt[16], wq[16], wi[16];
+    GetWindowTextW(g_edThreads, wt, 16);
+    GetWindowTextW(g_edQd, wq, 16);
+    GetWindowTextW(g_edIops, wi, 16);
+
+    uint32_t th = (uint32_t)_wtoi(wt);
+    uint32_t qd = (uint32_t)_wtoi(wq);
+    uint32_t bl = 0, io = (uint32_t)_wtoi(wi);
+    if (th < 1 || th > 64)  { wcscpy(g_status, L"线程数需在 1-64");   InvalidateRect(g_hwnd, NULL, FALSE); return; }
+    if (qd < 1 || qd > 128) { wcscpy(g_status, L"队列深度需在 1-128"); InvalidateRect(g_hwnd, NULL, FALSE); return; }
+    if (!ReadBlockIops(&bl, &io)) return;
+    if (!TryEnterPush()) {
+        wcscpy(g_status, L"上一次下发仍在进行中，请稍候 1-2 秒");
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return;
+    }
+
+    PushJob* j = new PushJob();
+    j->kind = 0; j->toAll = toAll;
+    j->th = th; j->qd = qd; j->bl = bl; j->io = io; j->pwr = 0; j->net = 0;
+    StartPush(j);
+}
+
+// 一键预设：threads/qd 固定，块大小与 IOPS 限制取输入框当前值，下发到全部在线
+static void PushPreset(uint32_t th, uint32_t qd) {
+    uint32_t bl = 0, io = 0;
+    if (!ReadBlockIops(&bl, &io)) return;
+    if (!TryEnterPush()) {
+        wcscpy(g_status, L"上一次下发仍在进行中，请稍候 1-2 秒");
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return;
+    }
+
+    // 先提示再启动线程：线程完成后会把状态栏覆盖为实际结果
+    swprintf(g_status, 256, L"预设 %ux%u QD 下发中（全部在线）...", th, qd);
+    InvalidateRect(g_hwnd, NULL, FALSE);
+
+    PushJob* j = new PushJob();
+    j->kind = 0; j->toAll = true;
+    j->th = th; j->qd = qd; j->bl = bl; j->io = io; j->pwr = 0; j->net = 0;
+    StartPush(j);
+}
+
+// 电源控制：带确认框，0 延迟立即执行，下发到全部在线客户端
+static void PushPower(int mode) {
+    wchar_t tip[320];
+    const wchar_t* detail =
+        (mode == 0) ? L"客户端会立即注销当前登录的用户（未保存数据将丢失）。"
+                    : (mode == 1) ? L"客户端立即执行系统关机（ATX 直接断电，不等应用保存）。"
+                                  : L"客户端立即强制杀掉所有应用并直接断电关机。";
+    swprintf(tip, 320,
+             L"确认对所有在线客户端下发「%s」？\r\n\r\n%s\r\n"
+             L"0 延迟立即执行，不可取消，确认继续？",
+             kPwrNames[mode], detail);
+    int id = MessageBoxW(g_hwnd, tip, L"电源控制确认", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (id != IDOK) return;
+    if (!TryEnterPush()) {
+        wcscpy(g_status, L"上一次下发仍在进行中，请稍候 1-2 秒");
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return;
+    }
+
+    // 先提示再启动线程：线程完成后会把状态栏覆盖为实际结果
+    swprintf(g_status, 256, L"电源指令「%s」下发中（全部在线）...", kPwrNames[mode]);
+    InvalidateRect(g_hwnd, NULL, FALSE);
+
+    PushJob* j = new PushJob();
+    j->kind = 2; j->toAll = true;
+    j->th = j->qd = j->bl = j->io = 0;
+    j->pwr = mode;
+    j->net = 0;
+    StartPush(j);
+}
+
+// 网络控制：一键断网 / 恢复网络，带确认框，下发到全部在线客户端
+static void PushNet(int action) {
+    wchar_t tip[320];
+    if (action == 0) {
+        swprintf(tip, 320,
+                 L"确认对所有在线客户端下发「一键断网」？\r\n\r\n"
+                 L"生效后目标电脑防火墙出/入站全部阻断，网络立即中断。\r\n"
+                 L"恢复方式：重启该电脑（服务开机自愈，自动恢复网络），\r\n"
+                 L"或断网生效前下发「恢复网络」。\r\n\r\n"
+                 L"断网后该电脑将离线，无法再远程下发恢复指令，确认继续？");
+    } else {
+        swprintf(tip, 320,
+                 L"确认对所有在线客户端下发「恢复网络」？\r\n\r\n"
+                 L"将删除防火墙阻塞规则（仅对未被断网的机器有意义）。");
+    }
+    int id = MessageBoxW(g_hwnd, tip, L"网络控制确认", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (id != IDOK) return;
+    if (!TryEnterPush()) {
+        wcscpy(g_status, L"上一次下发仍在进行中，请稍候 1-2 秒");
+        InvalidateRect(g_hwnd, NULL, FALSE);
+        return;
+    }
+
+    // 先提示再启动线程：线程完成后会把状态栏覆盖为实际结果
+    swprintf(g_status, 256, L"%s指令下发中（全部在线）...",
+             action == 0 ? L"一键断网" : L"恢复网络");
+    InvalidateRect(g_hwnd, NULL, FALSE);
+
+    PushJob* j = new PushJob();
+    j->kind = 3; j->toAll = true;
+    j->th = j->qd = j->bl = j->io = 0;
+    j->pwr = 0;
+    j->net = action;
+    StartPush(j);
 }
 
 // ------------------------------------------------------------ 绘制辅助
@@ -649,22 +879,54 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                DEFAULT_PITCH, L"Segoe UI");
 
         DWORD style = WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER;
-        g_edThreads = CreateWindowW(L"EDIT", L"4",    style, 0, 0, 100, 26, hwnd, (HMENU)101, NULL, NULL);
-        g_edQd      = CreateWindowW(L"EDIT", L"8",    style, 0, 0, 100, 26, hwnd, (HMENU)102, NULL, NULL);
-        g_edBlock   = CreateWindowW(L"EDIT", L"4096", style, 0, 0, 100, 26, hwnd, (HMENU)103, NULL, NULL);
-        g_edIops    = CreateWindowW(L"EDIT", L"0",    style, 0, 0, 100, 26, hwnd, (HMENU)104, NULL, NULL);
+        g_edThreads = CreateWindowW(L"EDIT", L"4",    style, 0, 0, 100, 26, hwnd, (HMENU)IDC_ED_THREADS, NULL, NULL);
+        g_edQd      = CreateWindowW(L"EDIT", L"8",    style, 0, 0, 100, 26, hwnd, (HMENU)IDC_ED_QD, NULL, NULL);
+        g_edBlock   = CreateWindowW(L"EDIT", L"4096", style, 0, 0, 100, 26, hwnd, (HMENU)IDC_ED_BLOCK, NULL, NULL);
+        g_edIops    = CreateWindowW(L"EDIT", L"0",    style, 0, 0, 100, 26, hwnd, (HMENU)IDC_ED_IOPS, NULL, NULL);
         g_btnOne = CreateWindowW(L"BUTTON", L"下发到选中",
                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                 0, 0, 100, 32, hwnd, (HMENU)201, NULL, NULL);
+                                 0, 0, 100, 32, hwnd, (HMENU)IDC_BTN_ONE, NULL, NULL);
         g_btnAll = CreateWindowW(L"BUTTON", L"下发到全部在线",
                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                 0, 0, 100, 32, hwnd, (HMENU)202, NULL, NULL);
+                                 0, 0, 100, 32, hwnd, (HMENU)IDC_BTN_ALL, NULL, NULL);
+        g_btnP1  = CreateWindowW(L"BUTTON", L"1x1 QD",
+                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P1, NULL, NULL);
+        g_btnP16 = CreateWindowW(L"BUTTON", L"16x16 QD",
+                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P16, NULL, NULL);
+        g_btnP32 = CreateWindowW(L"BUTTON", L"32x32 QD",
+                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                 0, 0, 100, 30, hwnd, (HMENU)IDC_BTN_P32, NULL, NULL);
+        g_btnPwr0 = CreateWindowW(L"BUTTON", L"立即注销",
+                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR0, NULL, NULL);
+        g_btnPwr1 = CreateWindowW(L"BUTTON", L"立即关机",
+                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR1, NULL, NULL);
+        g_btnPwr2 = CreateWindowW(L"BUTTON", L"立即强制关机",
+                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_PWR2, NULL, NULL);
+        g_btnNet0 = CreateWindowW(L"BUTTON", L"一键断网",
+                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_NET0, NULL, NULL);
+        g_btnNet1 = CreateWindowW(L"BUTTON", L"恢复网络",
+                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  0, 0, 100, 28, hwnd, (HMENU)IDC_BTN_NET1, NULL, NULL);
         SendMessageW(g_edThreads, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_edQd, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_edBlock, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_edIops, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_btnOne, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SendMessageW(g_btnAll, WM_SETFONT, (WPARAM)g_fBody, TRUE);
+        SendMessageW(g_btnP1,  WM_SETFONT, (WPARAM)g_fBody, TRUE);
+        SendMessageW(g_btnP16, WM_SETFONT, (WPARAM)g_fBody, TRUE);
+        SendMessageW(g_btnP32, WM_SETFONT, (WPARAM)g_fBody, TRUE);
+        SendMessageW(g_btnPwr0, WM_SETFONT, (WPARAM)g_fBody, TRUE);
+        SendMessageW(g_btnPwr1, WM_SETFONT, (WPARAM)g_fBody, TRUE);
+        SendMessageW(g_btnPwr2, WM_SETFONT, (WPARAM)g_fBody, TRUE);
+        SendMessageW(g_btnNet0, WM_SETFONT, (WPARAM)g_fBody, TRUE);
+        SendMessageW(g_btnNet1, WM_SETFONT, (WPARAM)g_fBody, TRUE);
         SetTimer(hwnd, 1, 1000, NULL);
         CreateThread(NULL, 0, ListenThreadSEH, NULL, 0, NULL);
         SrvLog("[OK]   界面", "UI 创建完成，监听线程已启动");
@@ -689,8 +951,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COMMAND:
         if (HIWORD(wp) == BN_CLICKED) {
-            if (LOWORD(wp) == 201) PushConfig(false);
-            if (LOWORD(wp) == 202) PushConfig(true);
+            switch (LOWORD(wp)) {
+            case IDC_BTN_ONE:  PushConfig(false); break;
+            case IDC_BTN_ALL:  PushConfig(true);  break;
+            case IDC_BTN_P1:   PushPreset(1, 1);  break;
+            case IDC_BTN_P16:  PushPreset(16, 16); break;
+            case IDC_BTN_P32:  PushPreset(32, 32); break;
+            case IDC_BTN_PWR0: PushPower(0); break;
+            case IDC_BTN_PWR1: PushPower(1); break;
+            case IDC_BTN_PWR2: PushPower(2); break;
+            case IDC_BTN_NET0: PushNet(0); break;
+            case IDC_BTN_NET1: PushNet(1); break;
+            }
         }
         return 0;
     case WM_LBUTTONDOWN: {
@@ -721,8 +993,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MoveWindow(g_edQd,      x, pr.top + 126, w, 26, TRUE);
         MoveWindow(g_edBlock,   x, pr.top + 184, w, 26, TRUE);
         MoveWindow(g_edIops,    x, pr.top + 242, w, 26, TRUE);
-        MoveWindow(g_btnOne,    x, pr.top + 292, w, 32, TRUE);
-        MoveWindow(g_btnAll,    x, pr.top + 334, w, 32, TRUE);
+        MoveWindow(g_btnOne,    x, pr.top + 292, w, 30, TRUE);
+        MoveWindow(g_btnAll,    x, pr.top + 328, w, 30, TRUE);
+        // 一键预设：三个并排
+        int w3 = (w - 16) / 3;
+        MoveWindow(g_btnP1,  x,                 pr.top + 396, w3,         30, TRUE);
+        MoveWindow(g_btnP16, x + w3 + 8,        pr.top + 396, w3,         30, TRUE);
+        MoveWindow(g_btnP32, x + (w3 + 8) * 2,  pr.top + 396, w - (w3 + 8) * 2, 30, TRUE);
+        // 电源控制：三行（注销 / 关机 / 强制关机）
+        MoveWindow(g_btnPwr0, x, pr.top + 464, w, 28, TRUE);
+        MoveWindow(g_btnPwr1, x, pr.top + 498, w, 28, TRUE);
+        MoveWindow(g_btnPwr2, x, pr.top + 532, w, 28, TRUE);
+        // 网络控制：一行两个（断网 / 恢复）
+        int wn = (w - 8) / 2;
+        MoveWindow(g_btnNet0, x,            pr.top + 586, wn,      28, TRUE);
+        MoveWindow(g_btnNet1, x + wn + 8,   pr.top + 586, w - wn - 8, 28, TRUE);
         return 0;
     }
     case WM_PAINT: {
@@ -742,7 +1027,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         wchar_t tmp[512];
 
         // ---- header ----
-        DrawTextAt(mem, L"DiskStress 控制中心", 20, 16, g_fTitle, C_TEXT);
+        DrawTextAt(mem, L"AceGuard 控制中心", 20, 16, g_fTitle, C_TEXT);
         EnterCriticalSection(&g_clientsLock);
         int total = (int)g_clients.size(), online = 0;
         for (int i = 0; i < total; i++) {
@@ -895,6 +1180,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DrawTextAt(mem, L"队列深度 QD（1-128）",         lx, pr.top + 104, g_fSmall, C_SUB);
         DrawTextAt(mem, L"块大小（512 的倍数，B）",      lx, pr.top + 162, g_fSmall, C_SUB);
         DrawTextAt(mem, L"IOPS 限制（0 = 不限）",        lx, pr.top + 220, g_fSmall, C_SUB);
+        DrawTextAt(mem, L"一键预设（全部在线，取上方块大小/IOPS）",
+                   lx, pr.top + 372, g_fSmall, C_SUB);
+        DrawTextAt(mem, L"电源控制（全部在线，0 延迟立即执行）", lx, pr.top + 442, g_fSmall, C_SUB);
+        DrawTextAt(mem, L"网络控制（全部在线；断网后重启自动恢复）", lx, pr.top + 564, g_fSmall, C_SUB);
         DrawTextAt(mem, L"下发后：客户端重建线程池（约 0.5 秒），",
                    lx, pr.bottom - 44, g_fSmall, C_DIM);
         DrawTextAt(mem, L"新配置下的最新数据 2 秒内刷回左侧实时数据。",
@@ -918,20 +1207,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     SrvLogResolve();
-    SrvLog("[OK]   启动", "DiskStress server starting, port=%d, log=%s", DS_PORT, g_logPathA);
+    SrvLog("[OK]   启动", "AceGuard server starting, port=%d, log=%s", DS_PORT, g_logPathA);
     ClientsInit();
 
     WNDCLASSW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.lpfnWndProc   = WndProcSEH;
     wc.hInstance     = hInst;
-    wc.lpszClassName = L"DiskStressServerWnd";
+    wc.lpszClassName = L"AceGuardServerWnd";
     wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
     if (!RegisterClassW(&wc)) return 1;
 
-    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"DiskStress 服务端控制中心",
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"AceGuard 服务端控制中心",
                                 WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1080, 720,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1080, 800,
                                 NULL, NULL, hInst, NULL);
     if (!hwnd) return 1;
     g_hwnd = hwnd;
