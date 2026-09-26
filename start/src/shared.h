@@ -1,4 +1,17 @@
 #pragma once
+// ---- Windows SDK 基线：钉死 Win10（netioapi/SCSI passthrough 等被 NTDDI 条件编译保护，
+//      不显式定义时新 SDK 默认值会把这些声明排除，导致 MIB_IF_ROW2/SCSI_PASS_THROUGH_DIRECT
+//      等 identifier not found）----
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+#ifndef WINVER
+#define WINVER 0x0A00
+#endif
+#ifndef NTDDI_VERSION
+#define NTDDI_VERSION NTDDI_WIN10
+#endif
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif

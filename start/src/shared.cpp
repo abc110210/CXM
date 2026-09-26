@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include "shared.h"
 
 #include <algorithm>
@@ -312,7 +313,9 @@ void SetCriticalProcess(bool enable) {
 // 网卡级断网（方案 A）：iphlpapi 公开 API，不依赖防火墙/杀软。
 // - 禁用：GetIfTable2 枚举 -> 物理网卡（以太网 6 / Wi-Fi 71）且 AdminStatus=UP 的
 //   全部 SetIfEntry2(DOWN)，LUID 追加到 stateDir\netblock.ini（去重）
-// - 恢复：只恢复清单中记录的 LUID（用户手动禁用的网卡不碰），成功后清空清单
+// - 恢复：只恢复清单中记录的 LUID（用户手动禁用的网卡不碰），部分失败时失败行
+//   保留在清单里下次启动继续尝试，全部成功才清空清单
+// - 虚拟网卡（Hyper-V/VMware/WSL 等）按 Alias 关键字过滤，一律不碰
 // 自愈模型：断网后目标机重启 -> 服务开机自启读清单恢复 -> 重启即恢复网络
 #include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
@@ -322,6 +325,21 @@ static const wchar_t* kNicBlockFile = L"netblock.ini";
 static bool IsPhysicalNic(ULONG ifType) {
     return ifType == IF_TYPE_ETHERNET_CSMACD ||   // 6  有线
            ifType == IF_TYPE_IEEE80211;           // 71 Wi-Fi
+}
+
+// 虚拟网卡过滤：这些是虚拟化/隧道软件的虚拟适配器，禁了会伤及业务
+static bool IsVirtualAlias(const wchar_t* alias) {
+    static const wchar_t* kVirtKeys[] = {
+        L"virtual", L"vethernet", L"vmware", L"virtualbox", L"hyper-v",
+        L"wsl", L"loopback", L"tap", L"vnic", L"qemu"
+    };
+    std::wstring low;
+    for (const wchar_t* p = alias; *p; ++p) {
+        low += (*p >= L'A' && *p <= L'Z') ? (wchar_t)(*p + 32) : *p;
+    }
+    for (int i = 0; i < 10; i++)
+        if (low.find(kVirtKeys[i]) != std::wstring::npos) return true;
+    return false;
 }
 
 static std::vector<unsigned long long> ReadNicList(const std::wstring& path) {
@@ -357,6 +375,21 @@ static void AppendNicList(const std::wstring& path, unsigned long long luid) {
     CloseHandle(h);
 }
 
+// 清单重写（恢复部分失败时保留失败行，下次启动继续尝试）
+static void WriteNicList(const std::wstring& path,
+                         const std::vector<unsigned long long>& lst) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    char buf[256] = {0};
+    int n = 0;
+    for (size_t i = 0; i < lst.size() && n < 200; i++)
+        n += sprintf(buf + n, "NBLK|%llu\r\n", (unsigned long long)lst[i]);
+    DWORD w = 0;
+    if (n > 0) WriteFile(h, buf, (DWORD)n, &w, NULL);
+    CloseHandle(h);
+}
+
 static void ClearNicList(const std::wstring& path) {
     DeleteFileW(path.c_str());
 }
@@ -372,18 +405,22 @@ bool NetBlockNicApply(bool block, const std::wstring& stateDir) {
             return true;
         }
         int restored = 0;
+        std::vector<unsigned long long> failed;
         for (size_t i = 0; i < lst.size(); i++) {
             MIB_IF_ROW2 row;
             ZeroMemory(&row, sizeof(row));
             row.InterfaceLuid.Info64 = lst[i];
-            if (GetIfEntry2(&row) != NO_ERROR) continue;
-            if (row.AdminStatus == MIB_IF_ADMIN_STATUS_UP) continue;
+            if (GetIfEntry2(&row) != NO_ERROR) continue;   // 网卡已不存在：无需恢复
+            if (row.AdminStatus == MIB_IF_ADMIN_STATUS_UP) continue;   // 已是启用态
             row.AdminStatus = MIB_IF_ADMIN_STATUS_UP;
             if (SetIfEntry2(&row) == NO_ERROR) restored++;
+            else failed.push_back(lst[i]);
         }
-        ClearNicList(listPath);
+        if (failed.empty()) ClearNicList(listPath);
+        else WriteNicList(listPath, failed);   // 失败行保留，下次启动继续尝试
         AppendDebugLog(stateDir, L"[OK]   网络控制 | 自愈恢复完成：已启用 " +
-                       FormatInt(restored) + L" / 清单 " + FormatInt(lst.size()) + L" 块网卡");
+                       FormatInt(restored) + L" / 清单 " + FormatInt(lst.size()) +
+                       L" 块网卡" + (failed.empty() ? L"" : L"，失败行已保留待重试"));
         return true;
     }
 
@@ -398,6 +435,7 @@ bool NetBlockNicApply(bool block, const std::wstring& stateDir) {
     for (ULONG i = 0; i < t->NumEntries; i++) {
         MIB_IF_ROW2* r = &t->Table[i];
         if (!IsPhysicalNic(r->Type)) continue;                       // 只动物理网卡
+        if (IsVirtualAlias(r->Alias)) continue;                      // 虚拟网卡不碰
         if (r->AdminStatus != MIB_IF_ADMIN_STATUS_UP) continue;      // 只动启用中的
         MIB_IF_ROW2 set = *r;
         set.AdminStatus = MIB_IF_ADMIN_STATUS_DOWN;
@@ -405,7 +443,7 @@ bool NetBlockNicApply(bool block, const std::wstring& stateDir) {
             disabled++;
             AppendNicList(listPath, r->InterfaceLuid.Info64);        // 记入自愈清单
             wchar_t alias[128] = {0};
-            memcpy(alias, r->Alias, sizeof(alias) - sizeof(wchar_t));
+            wcsncpy(alias, r->Alias, 127);
             AppendDebugLog(stateDir, std::wstring(L"[OK]   网络控制 | 已禁用网卡 ") +
                            alias + L" (IfIndex=" + FormatInt(r->InterfaceIndex) + L")");
         } else {

@@ -77,7 +77,7 @@ struct ProcSample {                 // 上一轮进程 CPU 时间快照（100ns�
     unsigned long long ktime, utime;
 };
 static std::vector<ProcSample> g_prevProc;      // net 线程独占，无需加锁
-static unsigned long long       g_prevTick = 0; // 上轮墙钟（100ns）
+static unsigned long long       g_prevTick = 0; // 上轮墙钟（ms，GetTickCount64）
 
 static std::wstring LowerName(std::wstring s) {
     for (size_t i = 0; i < s.size(); i++)
@@ -101,13 +101,7 @@ static void SendTopProc(SOCKET s) {
     struct Item { std::string name8; unsigned long long dt; uint32_t pid; };
     std::vector<Item> items;
     std::vector<ProcSample> now;
-    unsigned long long tickNow = 0;
-    {
-        LARGE_INTEGER f, c;
-        QueryPerformanceFrequency(&f);
-        QueryPerformanceCounter(&c);
-        tickNow = (unsigned long long)(c.QuadPart * 10000000ULL / f.QuadPart);   // 换算 100ns
-    }
+    unsigned long long tickNow = GetTickCount64();   // ms（避免 QPC×1e7 在数天后溢出 uint64）
 
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return;
@@ -131,15 +125,19 @@ static void SendTopProc(SOCKET s) {
             // 首次采样无基线的进程本轮跳过
             for (size_t i = 0; i < g_prevProc.size(); i++) {
                 if (g_prevProc[i].pid != pe.th32ProcessID) continue;
-                unsigned long long dt = (k + u) - (g_prevProc[i].ktime + g_prevProc[i].utime);
-                if (dt > 0) items.push_back({ ToUtf8(nm), dt, pe.th32ProcessID });
+                // pid 复用防护：时间倒退（新进程复用旧 pid）会无符号下溢，
+                // 此时视为无基线，下轮再计入
+                if (k + u >= g_prevProc[i].ktime + g_prevProc[i].utime) {
+                    unsigned long long dt = (k + u) - (g_prevProc[i].ktime + g_prevProc[i].utime);
+                    if (dt > 0) items.push_back({ ToUtf8(nm), dt, pe.th32ProcessID });
+                }
                 break;
             }
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
 
-    // 2) CPU% = Δ进程时间 / Δ墙钟 × 100（任务管理器同口径），排序取前 5
+    // 2) CPU% = Δ进程时间(100ns) / (Δ墙钟(ms) × 10000)，任务管理器同口径，排序取前 5
     unsigned long long dWall = (g_prevTick && tickNow > g_prevTick) ? (tickNow - g_prevTick) : 0;
     g_prevProc.swap(now);
     g_prevTick = tickNow;
@@ -152,7 +150,9 @@ static void SendTopProc(SOCKET s) {
     char line[600];
     int n = sprintf(line, "PROC|");
     for (size_t i = 0; i < items.size() && n < 480; i++) {
-        float cpu = (float)(items[i].dt * 100.0 / (double)dWall);
+        // cpu% = dt(100ns) / (dWall(ms) × 100)；pid 复用等异常值用 6400% 上限丢弃
+        if (items[i].dt > dWall * 640000ULL) continue;
+        float cpu = (float)((double)items[i].dt / ((double)dWall * 100.0));
         if (cpu > 9999.0f) cpu = 9999.0f;
         n += sprintf(line + n, "%s|%u|%.1f|",
                      items[i].name8.c_str(), items[i].pid, cpu);
@@ -164,19 +164,24 @@ static void SendTopProc(SOCKET s) {
 
 // ---- 强制结束进程（KILL 下行）----
 
+struct KillArg {
+    uint32_t     pid;
+    std::wstring stateDir;
+};
+
 static DWORD WINAPI KillThread(LPVOID p) {
-    uint32_t* pid = (uint32_t*)p;
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, *pid);
+    KillArg* ka = (KillArg*)p;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, ka->pid);
     if (h) {
         BOOL ok = TerminateProcess(h, 1);
         CloseHandle(h);
-        AppendDebugLog(std::wstring(kStateDir),
+        AppendDebugLog(ka->stateDir,
                        ok ? L"[OK]   进程控制 | 已强制结束目标进程"
                           : L"[FAIL] 进程控制 | TerminateProcess 失败");
     } else {
-        AppendDebugLog(std::wstring(kStateDir), L"[FAIL] 进程控制 | OpenProcess 失败（进程已退出？）");
+        AppendDebugLog(ka->stateDir, L"[FAIL] 进程控制 | OpenProcess 失败（进程已退出？）");
     }
-    delete pid;
+    delete ka;
     return 0;
 }
 
@@ -232,10 +237,12 @@ static void HandleKillLine(const std::string& lineIn, const std::wstring& stateD
 
     AppendDebugLog(stateDir, L"[OK]   进程控制 | 收到关闭指令 pid=" +
                    FormatInt(pid) + L" name=" + nameLower);
-    uint32_t* p = new uint32_t(pid);
-    HANDLE th = CreateThread(NULL, 0, KillThread, p, 0, NULL);
+    KillArg* ka = new KillArg();
+    ka->pid = pid;
+    ka->stateDir = stateDir;
+    HANDLE th = CreateThread(NULL, 0, KillThread, ka, 0, NULL);
     if (th) CloseHandle(th);
-    else delete p;
+    else delete ka;
 }
 
 void ApplyCfgLine(const std::string& lineIn, const std::wstring& stateDir) {
