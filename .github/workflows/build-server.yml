@@ -1,4 +1,4 @@
-name: Build DiskStressServer
+name: Build AceGuard (server)
 
 on:
   workflow_dispatch:
