@@ -321,11 +321,20 @@ void SetCriticalProcess(bool enable) {
 // 自愈模型：断网后目标机重启 -> 服务开机自启读清单恢复 -> 重启即恢复网络
 #include <setupapi.h>
 #include <cfgmgr32.h>
-#include <devguid.h>
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
+#ifndef SPDRP_FRIENDLYNAME
+#define SPDRP_FRIENDLYNAME 0x80000002
+#endif
+#ifndef SPDRP_DESCRIPTION
+#define SPDRP_DESCRIPTION 0x00000075
+#endif
 
 static const wchar_t* kNicBlockFile = L"netblock.ini";
+// Net 设备类 GUID {4D36E972-E325-11CE-BFC1-08002BE10318}（稳定公开值，
+// 自定义常量避免 devguid.h/INITGUID/uuid.lib 链接依赖）
+static const GUID AG_GUID_DEVCLASS_NET =
+    { 0x4d36e972, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } };
 
 // 虚拟网卡过滤：虚拟化/隧道软件的适配器，禁了会伤及业务
 static bool IsVirtualAlias(const wchar_t* name) {
