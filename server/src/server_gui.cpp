@@ -148,6 +148,17 @@ static void SrvLog(const char* tag, const char* fmt, ...) {
 
 #define OFFLINE_AFTER  8000     // ms 无心跳判定离线
 
+// ---- 固定窗口设计尺寸：自绘布局按客户区绝对定位，拉伸/最大化会导致错乱，禁止 resize ----
+static const int    DESIGN_W  = 1080, DESIGN_H = 800;
+static const DWORD  WND_STYLE = (WS_OVERLAPPEDWINDOW | WS_MINIMIZEBOX)
+                                & ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+static void CalcWndSize(int* w, int* h) {
+    RECT r = { 0, 0, DESIGN_W, DESIGN_H };
+    AdjustWindowRect(&r, WND_STYLE, FALSE);   // 客户区 1080x800 -> 含边框的窗口尺寸
+    *w = r.right - r.left;
+    *h = r.bottom - r.top;
+}
+
 // 前向声明：SEH 包装函数定义在真实函数之前，必须先声明否则 C3861
 static DWORD WINAPI SessionThread(LPVOID p);
 static DWORD WINAPI ListenThread(LPVOID p);
@@ -930,6 +941,20 @@ static LRESULT CALLBACK WndProcSEH(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_GETMINMAXINFO: {
+        // 固定窗口：最小/最大轨道尺寸都钉在设计值，拖边/缩放被系统直接拒绝
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        int w = 0, h = 0;
+        CalcWndSize(&w, &h);
+        mmi->ptMinTrackSize.x = w;  mmi->ptMinTrackSize.y = h;
+        mmi->ptMaxTrackSize.x = w;  mmi->ptMaxTrackSize.y = h;
+        mmi->ptMaxSize.x      = w;  mmi->ptMaxSize.y      = h;
+        return 0;
+    }
+    case WM_SYSCOMMAND:
+        // 双保险：拦截系统菜单/键盘触发的"大小/最大化"（Win+方向键、Alt+Space 等）
+        if ((wp & 0xFFF0) == SC_MAXIMIZE || (wp & 0xFFF0) == SC_SIZE) return 0;
+        break;
     case WM_CREATE: {
         g_fTitle = CreateFontW(-24, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET,
                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
@@ -1382,9 +1407,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
     if (!RegisterClassW(&wc)) return 1;
 
+    // 固定尺寸创建：客户区精确等于设计尺寸 1080x800
+    int wndW = 0, wndH = 0;
+    CalcWndSize(&wndW, &wndH);
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"AceGuard 服务端控制中心",
-                                WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1080, 800,
+                                WND_STYLE,
+                                CW_USEDEFAULT, CW_USEDEFAULT, wndW, wndH,
                                 NULL, NULL, hInst, NULL);
     if (!hwnd) return 1;
     g_hwnd = hwnd;
